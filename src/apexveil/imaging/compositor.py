@@ -103,7 +103,9 @@ def replace_surface(
         match_black=True,
         valid_mask=rect_visibility,
         context_tint=context_tint,
-        ink_resolved=blur_sigma <= 1.5,
+        ink_resolved=blur_sigma <= 1.5
+        and min(np.linalg.norm(quad[(i + 1) % 4] - quad[i]) for i in range(4)) >= 48,
+        context_black_level=context_detail.get("luminance_linear"),
     )
     appearance["context"] = context_detail
     appearance["reference"] = (

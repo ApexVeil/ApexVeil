@@ -74,3 +74,26 @@ def test_neutral_surroundings_prevent_green_face_color_becoming_material_color()
         np.zeros((120, 480, 3), np.uint8), rgb[40:160, 60:540], context_tint=tint
     )
     assert np.max(np.ptp(result.astype(float), axis=2)) == 0
+
+
+def test_compression_noise_in_dark_context_does_not_become_purple_tint():
+    from apexveil.imaging.appearance import estimate_context_tint
+
+    rgb = np.full((100, 300, 3), [5, 2, 7], np.uint8)
+    mask = np.zeros((100, 300), np.uint8)
+    mask[30:70, 70:230] = 1
+    quad = np.array([[70, 30], [229, 30], [229, 69], [70, 69]], np.float32)
+    tint, _ = estimate_context_tint(rgb, mask, quad)
+    np.testing.assert_allclose(tint, np.ones(3))
+
+
+def test_unresolved_ink_cannot_lift_new_black_plate_to_old_green_face_brightness():
+    original = np.full((100, 300, 3), [40, 130, 80], np.uint8)
+    result, _ = adapt_asset(
+        np.zeros_like(original),
+        original,
+        ink_resolved=False,
+        context_black_level=0.001,
+        context_tint=np.ones(3),
+    )
+    assert result.max() <= 8

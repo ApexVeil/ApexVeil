@@ -102,13 +102,14 @@ def estimate_context_tint(rgb, mask, quad):
     lo, hi = np.percentile(light, [8, 25])
     selected = samples[(light >= lo) & (light <= hi)]
     color = np.median(selected, axis=0)
-    if float(luma(color)) < 0.0003:
+    if float(luma(color)) < 0.003:
         tint = np.ones(3, np.float32)
     else:
         tint = np.clip(color / max(float(luma(color)), 1e-6), 0.05, 4)
         tint = tint / max(float(luma(tint)), 1e-6)
     return tint.astype(np.float32), {
         "method": "surrounding_dark_pixels",
+        "luminance_linear": float(luma(color)),
         "samples": len(selected),
         "tint_rgb": tint.tolist(),
     }
@@ -122,6 +123,7 @@ def adapt_asset(
     valid_mask=None,
     context_tint=None,
     ink_resolved=True,
+    context_black_level=None,
 ):
     """Transfer broad exposure, shadow structure and an RGB additive floor.
 
@@ -142,7 +144,7 @@ def adapt_asset(
     filled = cv2.morphologyEx(
         lum, operation, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     )
-    if dark_face:
+    if dark_face or not ink_resolved:
         yy, xx = np.mgrid[-1 : 1 : complex(height), -1 : 1 : complex(width)]
         terms = np.stack([np.ones_like(xx), xx, yy, xx * yy], axis=-1)
         coefficients = np.linalg.lstsq(
@@ -165,6 +167,8 @@ def adapt_asset(
         # Too little visible ink constrains a spatial color fit. A neutral
         # lower bound is safer than extrapolating the green face into a black asset.
         floor = float(np.percentile(lum[valid], 3)) * 0.65
+        if context_black_level is not None:
+            floor = min(floor, max(0.001, 2 * context_black_level))
         black = np.full_like(src, floor)
     if context_tint is not None:
         black = luma(black)[:, :, None] * np.asarray(context_tint, np.float32)
@@ -201,6 +205,8 @@ def adapt_asset(
         "tint_rgb": tint.tolist(),
         "luminance_p97_linear": brightness,
         "light_field_range": [float(field.min()), float(field.max())],
-        "illumination_model": "edge_preserving_diffuse_plus_smooth_additive_veil",
+        "illumination_model": "edge_preserving_diffuse_plus_smooth_additive_veil"
+        if ink_resolved
+        else "unresolved_ink_bilinear_light_and_bounded_floor",
         "physically_calibrated": False,
     }
