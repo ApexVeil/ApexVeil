@@ -552,7 +552,7 @@ def run_video(
         if mask.any():
             try:
                 initial, method = fit_quad(mask)
-                observed, logs = edge_refine(rgb, initial)
+                observed, logs = edge_refine(rgb, initial, visible_mask=mask)
                 quality = assess_geometry(mask, observed)
                 flags.extend(quality["flags"])
                 flags.extend(template_geometry_flags(observed, width / height))

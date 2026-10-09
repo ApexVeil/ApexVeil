@@ -8,7 +8,7 @@ The shared compositor uses the appearance fixes from `f5e99b6` plus the diagnost
 serialization correction in `9487cc4`. Every final report records exact source
 and implementation-file SHA-256 values. No Codex or other model review was run.
 
-## Results
+## Results: v1 before the geometry correction
 
 | Measure | Front driving shot | Tree-shadow approach |
 |---|---:|---:|
@@ -106,3 +106,48 @@ redistributed in this repository. The first priority after these examples is
 better visible-mask/complete-plane handling and correction keyframes for the
 failed tree intervals, followed by temporal appearance validation against new
 shots. A long edited montage should not be processed as one continuous track.
+
+
+## Controlled geometry correction: v1 → v2
+
+The same two clips were rendered again using the controlled geometry changes
+subsequently committed as `6d2981c`. They started from the working tree before
+that commit was finalized; the exact geometry file hash recorded by both runs
+is `19172950059480180c98806118d28677b225d343c7ec63bc8a9567505a359cf0`.
+Source video, SAM masks, target/exclusion selection, thresholds, appearance logic
+and the five-frame prediction limit were unchanged.
+
+The shared fitter now scales its outward allowance for small surfaces, narrows
+the image-gradient search band below 48 px, and rejects refinement candidates
+that reduce agreement with the supplied visible mask by more than 0.02. Video
+passes its current mask to this shared refinement API. The change does not fill
+mask holes or weaken the uncertainty threshold.
+
+| Measure | Front v1 → v2 | Tree-shadow v1 → v2 |
+|---|---:|---:|
+| Encoded frames | 60 → 60 | 75 → 75 |
+| Rendered replacement frames | 60 → 60 | 69 → 75 |
+| Skipped replacement frames | 0 → 0 | 6 → 0 |
+| Frames marked `needs_review` | 0 → 0 | 32 → 12 |
+| Coverage flags | 0 → 0 | 30 → 2 |
+| Motion-fused frames | 59 → 59 | 40 → 62 |
+
+The two remaining tree coverage flags occur at frames 43 and 44, where the mask
+includes part of the lower support. Nearby reliable motion supports two bounded
+flow-only predictions; the five-frame limit did not change. The other ten
+warnings are flow/observation disagreements (frames 1, 16, 17, 26–28, 33–34, 50,
+52). They remain visible rather than being counted as accepted frames. Every
+frame has a rendered preview, but this **does not mean the tree clip passed a
+quality review**.
+
+V2's front and tree diagnostic jobs took 59.74 and 79.01 s respectively, again
+with cached tracking and concurrent CPU execution. Four MP4 exports per case
+were independently checked: exactly 60/75 frames, 2.0/2.5 s, and unchanged source
+AAC packet payloads. The previous versions remain available privately for
+comparison; no test video is published in the repository.
+
+This is a controlled development improvement in continuity and mask/plane
+agreement, not ground-truth pose accuracy. The two clips were also used to
+diagnose the problem, so independent scenes and manual visual acceptance are
+still required. In particular, lower warning counts alone must not be presented
+as validated photorealism or privacy completeness.
