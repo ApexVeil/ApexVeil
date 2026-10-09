@@ -53,11 +53,13 @@ visible replacement pixels. Less than 50% visible reference coverage causes a
 skip. The shared compositor additionally applies its own stricter appearance
 reliability gates and retains current-frame context information.
 
-A short canonical-reference history suppresses small fluctuations. Broad
-lighting changes above an experimental threshold use a faster current-frame
-response, so a real moving shadow is not frozen merely to reduce variance.
-Isotropic softness has its own short state. This is not a physically recovered
-lighting model, directional motion blur, or soft foreground matting.
+The current path stabilizes fitted material parameters after estimation: log
+exposure gain, additive black-field color and tint. Source luminance changes
+allow fast response, while unsupported fitting spikes are bounded. The spatial
+shadow field remains current-frame data. Existing softness state is retained.
+See [TEMPORAL_COMPOSITING.md](TEMPORAL_COMPOSITING.md) for the observation gates,
+state lifecycle and validation scope. Physical relighting, directional motion
+blur and soft foreground matting are not implemented.
 
 ## Timing, audio, and output
 

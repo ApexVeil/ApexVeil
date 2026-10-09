@@ -4,7 +4,7 @@ Two continuous shots from a user-supplied 720p review video were processed on
 H20. The clips and their outputs remain private. They are development examples,
 not a held-out benchmark or a claim that the full 70-second montage works.
 
-The shared compositor uses the appearance fixes from `f5e99b6` plus the diagnostic
+The first two versions below use the appearance fixes from `f5e99b6` plus the diagnostic
 serialization correction in `9487cc4`. Every final report records exact source
 and implementation-file SHA-256 values. No Codex or other model review was run.
 
@@ -151,3 +151,38 @@ agreement, not ground-truth pose accuracy. The two clips were also used to
 diagnose the problem, so independent scenes and manual visual acceptance are
 still required. In particular, lower warning counts alone must not be presented
 as validated photorealism or privacy completeness.
+
+
+## V3 — stabilize placement and fitted appearance parameters
+
+SAM3.1 text initialization and its native tracking masks remain unchanged. This
+iteration changes only compositing state: disputed observed corners receive a
+visibility-supported, bounded correction instead of an immediate snap;
+exposure gain, black-field color and tint now have parameter-level temporal
+state. The current spatial illumination field is retained. Details and
+synthetic validation are in [TEMPORAL_COMPOSITING.md](TEMPORAL_COMPOSITING.md).
+
+Both private shots still render every frame: 60/60 front and 75/75 tree frames.
+The tree shot has 9 flagged frames (previously 12). The front shot has 3 flagged
+frames (previously zero) because the new check separately detects single-corner
+outliers that the former median-only check missed. These counts are internal
+review signals, not acceptance scores or measures of accuracy.
+
+In a controlled geometry-only replay, the largest motion-compensated corner
+correction was 10.46 px in V2; bounded corrections in V3 reached at most 3.53 px.
+The real-render exposure-gain log-step p95 changed from 0.00881 to 0.00610 in the
+front shot and from 0.39007 to 0.26670 in the tree shot. Smaller fitted-parameter
+variation is not proof of correct lighting: genuine source lighting changes
+must still remain visible, and there are no independent photometric labels.
+
+All eight standard exported MP4s again passed encoded-frame count, duration and
+source AAC-payload checks. Final jobs reused cached SAM masks and took about
+59.5/78.4 seconds while exporting diagnostic variants concurrently on CPU; these
+are not real-time throughput claims. The test suite now has 43 CPU checks.
+
+V3 private outputs are in `outputs/video-temporal-final-20261010-front/` and
+`outputs/video-temporal-final-20261010-shadow/`. `previous-vs-updated.mp4` compares
+**original / previous temporal composition / updated temporal composition**,
+using exactly the same source interval. A keyframe contact sheet complements
+playback but does not replace whole-clip visual inspection. Videos remain
+unpublished; no AI acceptance model has approved these results.
