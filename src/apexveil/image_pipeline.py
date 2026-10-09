@@ -13,7 +13,13 @@ from .imaging.compositor import (
     redact_surface,
     local_bounds,
 )
-from .imaging.geometry import fit_quad, edge_refine, assess_geometry, order_quad
+from .imaging.geometry import (
+    fit_quad,
+    edge_refine,
+    assess_geometry,
+    order_quad,
+    template_geometry_flags,
+)
 from .imaging.focus import estimate_edge_softness
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff"}
@@ -107,19 +113,11 @@ def render(
         if action == "replace":
             if "quad" in surface:
                 q = np.asarray(surface["quad"], np.float32)
-                lengths = [np.linalg.norm(q[(i + 1) % 4] - q[i]) for i in range(4)]
-                aspect = (lengths[0] + lengths[2]) / max(1.0, lengths[1] + lengths[3])
-                artwork_aspect = template.alpha.shape[1] / template.alpha.shape[0]
-                # A tiny visible fragment must not become the entire wide design.
-                # Strong true foreshortening can also trigger this conservative gate.
-                if (
-                    aspect / artwork_aspect < 0.55
-                    and "possible_occlusion_or_extreme_foreshortening"
-                    not in surface["flags"]
+                for flag in template_geometry_flags(
+                    q, template.alpha.shape[1] / template.alpha.shape[0]
                 ):
-                    surface["flags"].append(
-                        "possible_occlusion_or_extreme_foreshortening"
-                    )
+                    if flag not in surface["flags"]:
+                        surface["flags"].append(flag)
             uncertain = bool(surface["flags"])
             if "quad" not in surface or (
                 uncertain

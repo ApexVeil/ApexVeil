@@ -176,3 +176,17 @@ def assess_geometry(mask, quad):
     if coverage < 0.88:
         flags.append("occluded_or_non_planar_boundary")
     return {"flags": flags, "coverage": coverage, "min_edge_px": min(lengths)}
+
+
+def template_geometry_flags(quad, artwork_aspect):
+    """Shared still/video guard against stretching a visible sliver into a face.
+
+    Strong genuine perspective can trigger this conservative gate. A manual
+    complete-plane correction is needed; it is not a detector confidence score.
+    """
+    q = np.asarray(quad, np.float32)
+    lengths = [np.linalg.norm(q[(i + 1) % 4] - q[i]) for i in range(4)]
+    aspect = (lengths[0] + lengths[2]) / max(1.0, lengths[1] + lengths[3])
+    if aspect / artwork_aspect < 0.55:
+        return ["possible_occlusion_or_extreme_foreshortening"]
+    return []
