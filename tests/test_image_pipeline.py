@@ -153,3 +153,10 @@ def test_small_visible_fragment_is_not_stretched_into_full_artwork():
     )
     assert report["status"] == "needs_review"
     assert np.array_equal(output, rgb)
+
+
+def test_compositor_diagnostics_are_json_serializable():
+    import json
+    rgb, mask, quad, template = fixture_scene()
+    _, detail = replace_surface(rgb, mask, quad, template)
+    json.dumps(detail)

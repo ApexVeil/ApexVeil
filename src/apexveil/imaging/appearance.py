@@ -130,6 +130,7 @@ def adapt_asset(
     Green face color and old lettering are not directly copied into the asset.
     Matte/retroreflective materials still differ; this is not recovered lighting.
     """
+    ink_resolved = bool(ink_resolved)
     src, a = linear(original_rect), linear(asset)
     lum = luma(src)
     height, width = lum.shape
