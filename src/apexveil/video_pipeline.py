@@ -318,8 +318,8 @@ def make_comparison(
         for slot, (label, source) in enumerate(
             [
                 ("Original / CFR segment", path),
-                ("Independent frame composite", per_frame_dir / path.name),
-                ("Motion + appearance state", temporal_dir / path.name),
+                ("SAM tracked / framewise composition", per_frame_dir / path.name),
+                ("SAM tracked / temporal composition", temporal_dir / path.name),
             ]
         ):
             with Image.open(source) as image:

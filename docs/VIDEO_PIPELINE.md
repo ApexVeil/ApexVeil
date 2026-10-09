@@ -3,7 +3,11 @@
 `python -m apexveil.video_pipeline` processes one already-selected continuous shot
 of at most four seconds. It is an experimental entry point, not the long-video
 editor. It calls the same `replace_surface` and redaction functions as the image
-pipeline and exports original, independent-frame, and temporal variants.
+pipeline and exports original, framewise-composition, and temporal-composition variants.
+Both edited variants use the same SAM3.1 temporal masks. The framewise baseline
+independently estimates geometry and appearance; it does not independently run
+a text detector on every frame. This baseline is an ablation, not the intended
+production path.
 
 ```sh
 conda activate apexveil
