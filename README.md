@@ -1,0 +1,57 @@
+# ApexVeil · 极影
+
+**Precision in motion.**
+
+ApexVeil is an independent project for scene-consistent automotive image and video compositing. Its first workflow is replacing or anonymizing license plates while respecting perspective, visibility, lighting and imaging blur.
+
+[Project page](https://apexveil.github.io) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md)
+
+## Status
+
+**Foundation / pre-alpha.** This repository currently provides a standalone environment, pinned SAM3.1 backend, model integrity checks and bounded GPU segmentation/tracking smoke tests. The image compositor migration, interactive Web editor and optional AI review are in development. It is not yet a released image/video replacement application.
+
+SAM3.1 is one model backend; ApexVeil's product and source are independent of upstream model naming and any other project.
+
+## Setup
+
+Prerequisites: Git, Conda, an NVIDIA GPU/compatible driver and FFmpeg on PATH. The reference environment uses Python 3.12 and PyTorch 2.10 with CUDA 12.8. Obtain access to the official [SAM3.1 checkpoint](https://huggingface.co/facebook/sam3.1) and authenticate with your own Hugging Face account.
+
+```sh
+git clone --recurse-submodules https://github.com/ApexVeil/ApexVeil.git
+cd ApexVeil
+conda env create -f environment.yml
+conda activate apexveil
+python -m pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+python -m pip install -r requirements/runtime.txt
+python -m pip install --no-deps -e third_party/sam3
+python -m pip install -e '.[dev]'
+hf auth login
+apexveil models download
+apexveil doctor
+```
+
+The checkpoint lives in `models/sam3.1/`, with pinned provenance in [models/manifest.json](models/manifest.json). Model weights and user media are never committed.
+
+## Bounded GPU validation
+
+Place a short video or numerically named JPEG frames in a private data directory. A single frame is a one-image segmentation test. The command writes masks and a JSON report; it does not change the original or replace its pixels.
+
+```sh
+CUDA_VISIBLE_DEVICES=0 apexveil smoke data/private/smoke-frames --max-frames 3 --output outputs/smoke
+python -m pytest -q
+```
+
+## Product direction
+
+- One shared processing core for images and video.
+- Transparent custom artwork, blur and mosaic as per-target treatments.
+- User selection through clicks or short strokes, with explicit corrections.
+- Separate full-surface geometry from the currently visible region.
+- Server-side AI review, configurable by the operator.
+- A remote Web editor accessed through ordinary SSH forwarding during development.
+
+See [development notes](docs/DEVELOPMENT.md) for the intended forwarding workflow. Public hosting and invitations are deferred until the core is ready.
+
+## License
+
+Original ApexVeil code: Apache-2.0. SAM source and weights retain their separate upstream SAM License. See [third-party notices](THIRD_PARTY_NOTICES.md).

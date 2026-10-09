@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75,<81", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apexveil"
+version = "0.1.0a1"
+description = "Scene-consistent automotive image and video compositing."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = {text = "Apache-2.0"}
+authors = [{name = "ApexVeil contributors"}]
+dependencies = ["numpy>=1.26,<2", "Pillow>=10,<13", "huggingface-hub>=0.34,<2"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+apexveil = "apexveil.cli:main"
+
+[project.urls]
+Homepage = "https://apexveil.github.io"
+Repository = "https://github.com/ApexVeil/ApexVeil"
+Issues = "https://github.com/ApexVeil/ApexVeil/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

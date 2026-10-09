@@ -1,0 +1,21 @@
+[project]
+root = ".."
+
+[model]
+checkpoint = "models/sam3.1/sam3.1_multiplex.pt"
+confidence_threshold = 0.5
+# Portable default: use PyTorch attention before benchmarking optional FA3.
+use_fa3 = false
+compile = false
+
+[review]
+enabled = false
+provider = "codex"
+model = "gpt-6-luna"
+reasoning_effort = "high"
+# Review transport is planned, not implemented in this setup release.
+
+[server]
+host = "127.0.0.1"
+port = 7860
+# The editing GUI is planned, not implemented in this setup release.
