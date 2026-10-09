@@ -159,8 +159,8 @@ def edge_refine(rgb, initial, visible_mask=None):
             )
             break
         if visible_mask is not None:
-            prior_support = assess_geometry(visible_mask, q)["coverage"]
-            new_support = assess_geometry(visible_mask, candidate)["coverage"]
+            prior_support = visible_coverage(visible_mask, q)
+            new_support = visible_coverage(visible_mask, candidate)
             if new_support < prior_support - 0.02:
                 logs.append(
                     {
@@ -176,14 +176,26 @@ def edge_refine(rgb, initial, visible_mask=None):
     return q, logs
 
 
+def visible_coverage(mask, quad):
+    """Measure visible support locally without allocating a full-frame polygon."""
+    h, w = mask.shape
+    vertices = np.rint(quad).astype(np.int32)
+    x0, y0 = np.maximum(vertices.min(axis=0), 0)
+    x1, y1 = np.minimum(vertices.max(axis=0) + 1, [w, h])
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    polygon = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    cv2.fillConvexPoly(polygon, vertices - [x0, y0], 1)
+    return float(
+        ((mask[y0:y1, x0:x1] > 0) & (polygon > 0)).sum() / max(int(polygon.sum()), 1)
+    )
+
+
 def assess_geometry(mask, quad):
     """Flag under-constrained cases; segmentation is not a full-plane oracle."""
     h, w = mask.shape
-    polygon = np.zeros((h, w), np.uint8)
-    cv2.fillConvexPoly(polygon, np.rint(quad).astype(np.int32), 1)
     visible = mask > 0
-    area = int(polygon.sum())
-    coverage = float((visible & (polygon > 0)).sum() / max(area, 1))
+    coverage = visible_coverage(mask, quad)
     lengths = [float(np.linalg.norm(quad[(i + 1) % 4] - quad[i])) for i in range(4)]
     flags = []
     ys, xs = np.where(visible)
