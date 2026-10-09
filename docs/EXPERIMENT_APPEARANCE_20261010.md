@@ -40,7 +40,7 @@ needs a larger, diverse evaluation set.
 All nine controlled renders changed zero working-buffer pixels outside their
 supplied visible masks. This does not prove the masks are correct or guarantee
 encoded JPEG/video pixels remain bit-identical. Per-image render calls took
-about 0.43–0.85 s in this run (median about 0.57 s), excluding model inference,
+about 0.28–0.72 s in the final run (median about 0.60 s), excluding model inference,
 image loading, output encoding and report writing. Do not call this end-to-end
 latency. The default image pipeline's quality gates have not been relaxed.
 
