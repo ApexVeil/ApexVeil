@@ -13,19 +13,3 @@ The initial environment was validated on Linux with an NVIDIA H20 and driver 580
 ## Pinned predictor compatibility
 
 The pinned SAM shared predictor passes an optional state-offload argument that its multiplex model does not accept. ApexVeil adapts only the created model instance: a disabled flag is removed; enabling unsupported state offload raises an error. The vendored source is unchanged. Real-valued RoPE conversion is disabled for the initial checkpoint-compatible path. Every learned tensor is checked against the checkpoint for key presence and shape after construction.
-
-## Fresh interactive video output compatibility
-
-The pinned multiplex interactivity implementation returns `{}` from
-`_build_sam2_output` for a frame absent from `cached_frame_outputs`, before it
-merges `refined_obj_id_to_mask` supplied by that call. Fresh point-seeded sessions
-can therefore discard the tracker's current prediction; examples that first
-populate every frame through visual grounding may not reveal this behavior.
-
-ApexVeil installs a narrow instance-level wrapper in `backends/sam31.py` to merge
-those supplied masks on uncached frames. It does not synthesize masks, change
-scores/thresholds, pre-populate a detection cache, force action history, or edit
-the vendored repository. Existing cached-frame behavior is preserved. The model
-load audit records the compatibility adapter. CPU regression checks cover fresh
-and cached outputs, absent predictions, state preservation and repeat install.
-The point-prompt experiment documents real-model validation separately.
