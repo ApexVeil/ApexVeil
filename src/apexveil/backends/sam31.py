@@ -9,6 +9,31 @@ import numpy as np
 from PIL import Image
 
 
+
+def install_interactive_output_compat(model):
+    """Keep freshly tracked point-prompt masks when no VG cache exists.
+
+    The pinned multiplex adapter returns early for an uncached frame before
+    merging the tracker masks supplied in that same call. A fresh point-only
+    session therefore drops valid predictions. Repair output assembly on this
+    instance; do not change inference, scores, visibility, or action history.
+    """
+    if getattr(model, "apexveil_interactive_output_compat", False):
+        return
+    original = model._build_sam2_output
+
+    @wraps(original)
+    def compatible_output(inference_state, frame_idx, refined_obj_id_to_mask=None):
+        result = original(inference_state, frame_idx, refined_obj_id_to_mask)
+        if frame_idx not in inference_state["cached_frame_outputs"] and refined_obj_id_to_mask:
+            result = dict(result)
+            result.update(refined_obj_id_to_mask)
+        return result
+
+    model._build_sam2_output = compatible_output
+    model.apexveil_interactive_output_compat = True
+
+
 def build_predictor(settings):
     if not settings.checkpoint.is_file():
         raise FileNotFoundError("Checkpoint missing. Run apexveil models download first.")
@@ -43,7 +68,9 @@ def build_predictor(settings):
                   if key in state and value.shape != state[key].shape]
     if missing or mismatched:
         raise RuntimeError(f"Incomplete learned checkpoint: missing={missing[:8]}, shape={mismatched[:8]}")
-    predictor.apexveil_load_audit = {"learned_tensors_checked": len(parameters),
+    install_interactive_output_compat(predictor.model)
+    predictor.apexveil_load_audit = {"interactive_output_compat": "merge_fresh_tracker_masks_without_vg_cache",
+                                   "learned_tensors_checked": len(parameters),
                                    "missing_learned_tensors": 0, "shape_mismatches": 0}
     del state
     return predictor
