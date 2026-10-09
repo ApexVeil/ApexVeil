@@ -127,6 +127,84 @@ class TemporalGeometry:
         self.previous_quad = None
         self.prediction_age = 0
         self.maximum_prediction_frames = maximum_prediction_frames
+        self.awaiting_observation_recovery = False
+
+    @staticmethod
+    def _mask_agreement(quad, visible_mask):
+        """Current-frame evidence, independent of the flow fit's inlier score."""
+        corners = np.rint(quad).astype(np.int32)
+        h, w = visible_mask.shape
+        x0, y0 = np.maximum(corners.min(axis=0), 0)
+        x1, y1 = np.minimum(corners.max(axis=0) + 1, [w, h])
+        if x1 <= x0 or y1 <= y0:
+            return 0.0
+        polygon = np.zeros((y1 - y0, x1 - x0), np.uint8)
+        cv2.fillConvexPoly(polygon, corners - [x0, y0], 1)
+        local = visible_mask[y0:y1, x0:x1] > 0
+        intersection = int(((polygon > 0) & local).sum())
+        union = int(polygon.sum()) + int(np.count_nonzero(visible_mask)) - intersection
+        return intersection / max(1, union)
+
+    def _bounded_observation_update(
+        self, prediction, observation, visible_mask, flow_confidence, short, details
+    ):
+        """Correct the already-motion-compensated plane, never screen-space EMA."""
+        prediction_support = self._mask_agreement(prediction, visible_mask)
+        observation_support = self._mask_agreement(observation, visible_mask)
+        advantage = observation_support - prediction_support
+        details.update(
+            prediction_mask_agreement=prediction_support,
+            observation_mask_agreement=observation_support,
+        )
+        # A high-inlier LK estimate can still extrapolate poorly at the corners.
+        # Conversely a fitted corner can jump off the visible surface. Use both
+        # independent current-mask agreement and tracker confidence to decide.
+        if advantage < -0.05:
+            details["flags"].append("observation_rejected_by_visibility")
+            details["observation_weight"] = 0.0
+            details["correction_decision"] = "reject_observation"
+            self.prediction_age += 1
+            if self.prediction_age > self.maximum_prediction_frames:
+                details["flags"].append("prediction_budget_exhausted")
+                self.awaiting_observation_recovery = True
+                return None
+            details["flags"].append("flow_only_geometry_prediction")
+            return prediction
+        confidence = float(np.clip(flow_confidence, 0.0, 1.0))
+        weight = float(
+            np.clip(
+                0.30 + 0.40 * (1 - confidence) + 1.5 * max(0.0, advantage), 0.20, 0.85
+            )
+        )
+        # The cap expands only if motion evidence weakens or current visible
+        # pixels strongly favor the observation. Actual vehicle motion is already
+        # represented in prediction and is not capped by this innovation limit.
+        limit = max(2.0, float(short) * (0.08 + 0.15 * (1 - confidence)))
+        limit += float(short) * min(0.40, max(0.0, advantage))
+        correction = (observation - prediction) * weight
+        norms = np.linalg.norm(correction, axis=1)
+        correction *= np.minimum(1.0, limit / np.maximum(norms, 1e-6))[:, None]
+        candidate = prediction + correction
+        details.update(
+            observation_weight=weight,
+            innovation_limit_px=float(limit),
+            applied_innovation_max_px=float(np.linalg.norm(correction, axis=1).max()),
+            correction_decision="bounded_observation_update",
+        )
+        if np.any(norms > limit):
+            details["flags"].append("observation_correction_limited")
+        if not valid_quad(candidate, prediction):
+            details["flags"].append("invalid_corrected_quad_rejected")
+            self.prediction_age += 1
+            if self.prediction_age > self.maximum_prediction_frames:
+                details["flags"].append("prediction_budget_exhausted")
+                self.awaiting_observation_recovery = True
+                return None
+            details["flags"].append("flow_only_geometry_prediction")
+            return prediction
+        self.prediction_age = 0
+        self.awaiting_observation_recovery = False
+        return candidate
 
     def step(self, rgb, visible_mask, observed_quad, observation_reliable=True):
         gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
@@ -163,15 +241,22 @@ class TemporalGeometry:
             self.prediction_age = 0
         if prediction is not None and details["flow"].get("confidence", 0) >= 0.3:
             if observation is not None and observation_reliable:
-                residual = float(
-                    np.median(np.linalg.norm(observation - prediction, axis=1))
-                )
+                corner_innovations = np.linalg.norm(observation - prediction, axis=1)
+                residual = float(np.median(corner_innovations))
                 short = min(
                     np.linalg.norm(prediction[(i + 1) % 4] - prediction[i])
                     for i in range(4)
                 )
                 details["observation_motion_residual_px"] = residual
-                if residual < max(4.0, float(short) * 0.18):
+                details["maximum_corner_innovation_px"] = float(
+                    corner_innovations.max()
+                )
+                corner_outlier = float(corner_innovations.max()) > max(
+                    3.0, float(short) * 0.10
+                ) and float(corner_innovations.max()) > 3 * (residual + 0.25)
+                if corner_outlier:
+                    details["flags"].append("single_corner_innovation_outlier")
+                if residual < max(4.0, float(short) * 0.18) and not corner_outlier:
                     weight = float(
                         np.clip(0.45 - 0.25 * details["flow"]["confidence"], 0.20, 0.45)
                     )
@@ -180,11 +265,16 @@ class TemporalGeometry:
                     details["status"] = "motion_fused"
                     self.prediction_age = 0
                 else:
-                    # Disagreement is not silent smoothing: retain the reliable
-                    # current observation and explicitly request inspection.
-                    q = observation
                     details["flags"].append("flow_observation_disagreement")
                     details["status"] = "needs_review"
+                    q = self._bounded_observation_update(
+                        prediction,
+                        observation,
+                        visible_mask,
+                        details["flow"]["confidence"],
+                        short,
+                        details,
+                    )
             elif (
                 self.prediction_age < self.maximum_prediction_frames
                 and visible_mask.any()
@@ -197,20 +287,29 @@ class TemporalGeometry:
                 q = None
                 details["flags"].append("insufficient_geometry")
         elif observation is not None and observation_reliable:
-            q = observation
-            details["status"] = (
-                "initialized"
-                if self.previous_gray is None or cut
-                else "observation_only"
-            )
-            if cut:
-                details["status"] = "needs_review"
-            self.prediction_age = 0
+            if (
+                self.awaiting_observation_recovery
+                and self._mask_agreement(observation, visible_mask) < 0.85
+            ):
+                q = None
+                details["flags"].append("observation_recovery_needs_review")
+            else:
+                q = observation
+                details["status"] = (
+                    "initialized"
+                    if self.previous_gray is None or cut
+                    else "observation_only"
+                )
+                if cut:
+                    details["status"] = "needs_review"
+                self.prediction_age = 0
+                self.awaiting_observation_recovery = False
         else:
             q = None
             details["flags"].append("insufficient_geometry")
         if q is not None:
             q = order_quad(q)
+        details["prediction_age"] = self.prediction_age
         self.previous_gray = gray
         self.previous_mask = (visible_mask > 0).astype(np.uint8)
         self.previous_quad = q

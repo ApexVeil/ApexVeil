@@ -149,3 +149,98 @@ def test_new_foreground_cannot_supply_flow_for_the_hidden_surface():
     result = estimator.step(previous.copy(), np.zeros_like(mask), None)
     assert result.quad is None
     assert result.diagnostics["flow"]["current_visibility_rejected"] >= 5
+
+
+def transformed_surface(image, mask, quad, matrix):
+    size = (image.shape[1], image.shape[0])
+    current = cv2.warpPerspective(image, matrix, size, borderMode=cv2.BORDER_REFLECT)
+    visible = cv2.warpPerspective(mask, matrix, size, flags=cv2.INTER_NEAREST)
+    truth = cv2.perspectiveTransform(quad[None], matrix)[0]
+    return current, visible, truth
+
+
+def test_temporal_geometry_does_not_lag_real_accelerating_translation():
+    image, mask, quad = textured_surface()
+    estimator = TemporalGeometry()
+    for offset in [0, 2, 6, 12, 20, 30]:
+        matrix = np.array(
+            [[1, 0, offset], [0, 1, offset * 0.15], [0, 0, 1]], np.float32
+        )
+        current, visible, truth = transformed_surface(image, mask, quad, matrix)
+        result = estimator.step(current, visible, truth)
+        assert result.quad is not None
+        assert np.linalg.norm(result.quad.mean(axis=0) - truth.mean(axis=0)) < 1.0
+
+
+def test_temporal_geometry_preserves_true_perspective_motion():
+    image, mask, quad = textured_surface()
+    estimator = TemporalGeometry()
+    for i in range(10):
+        matrix = np.array(
+            [
+                [1 + 0.005 * i, 0.005 * i, 2 * i],
+                [0.002 * i, 1 - 0.003 * i, 0.4 * i],
+                [0.000035 * i, -0.000015 * i, 1],
+            ],
+            np.float32,
+        )
+        current, visible, truth = transformed_surface(image, mask, quad, matrix)
+        result = estimator.step(current, visible, truth)
+        assert result.quad is not None
+        assert np.max(np.linalg.norm(result.quad - truth, axis=1)) < 1.5
+
+
+def test_single_incorrect_corner_is_rejected_without_a_visible_jump():
+    image, mask, quad = textured_surface()
+    estimator = TemporalGeometry()
+    for i in range(8):
+        matrix = np.array([[1, 0, 2 * i], [0, 1, -i], [0, 0, 1]], np.float32)
+        current, visible, truth = transformed_surface(image, mask, quad, matrix)
+        observation = truth.copy()
+        if i == 4:
+            observation[1] += [35, -25]
+        result = estimator.step(current, visible, observation)
+        assert result.quad is not None
+        assert np.max(np.linalg.norm(result.quad - truth, axis=1)) < 1.5
+        if i == 4:
+            assert "flow_observation_disagreement" in result.diagnostics["flags"]
+            assert "observation_rejected_by_visibility" in result.diagnostics["flags"]
+            assert result.diagnostics["status"] == "needs_review"
+
+
+def test_rejected_observations_cannot_extend_the_prediction_budget():
+    image, mask, quad = textured_surface()
+    estimator = TemporalGeometry(maximum_prediction_frames=5)
+    estimator.step(image, mask, quad)
+    incorrect = quad.copy()
+    incorrect[1] += [35, -25]
+    for i in range(1, 8):
+        result = estimator.step(image, mask, incorrect)
+        assert (result.quad is not None) == (i <= 5)
+    recovered = estimator.step(image, mask, quad)
+    assert recovered.quad is not None
+    assert recovered.diagnostics["prediction_age"] == 0
+
+
+def test_disagreement_corrects_a_biased_plane_without_snapping_to_observation():
+    image, mask, truth0 = textured_surface()
+    estimator = TemporalGeometry()
+    # A pre-existing initialization error is distinct from real frame motion.
+    biased = truth0 - [30, 0]
+    estimator.step(image, mask, biased.astype(np.float32))
+    matrix = np.array([[1, 0, 3], [0, 1, -2], [0, 0, 1]], np.float32)
+    current, visible, truth = transformed_surface(image, mask, truth0, matrix)
+    result = estimator.step(current, visible, truth)
+    assert result.quad is not None
+    assert result.diagnostics["correction_decision"] == "bounded_observation_update"
+    assert "flow_observation_disagreement" in result.diagnostics["flags"]
+    error = np.linalg.norm(result.quad.mean(axis=0) - truth.mean(axis=0))
+    assert 1 < error < 30
+    assert (
+        result.diagnostics["applied_innovation_max_px"]
+        <= result.diagnostics["innovation_limit_px"] + 1e-5
+    )
+    assert (
+        result.diagnostics["observation_mask_agreement"]
+        > result.diagnostics["prediction_mask_agreement"]
+    )
