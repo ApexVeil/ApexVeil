@@ -1,6 +1,8 @@
 """SAM3.1 integration using the public upstream predictor API."""
 
 import json
+import inspect
+from functools import wraps
 from pathlib import Path
 import time
 import numpy as np
@@ -11,9 +13,40 @@ def build_predictor(settings):
     if not settings.checkpoint.is_file():
         raise FileNotFoundError("Checkpoint missing. Run apexveil models download first.")
     from sam3.model_builder import build_sam3_predictor
-    return build_sam3_predictor(checkpoint_path=str(settings.checkpoint), version="sam3.1",
-                               use_fa3=settings.use_fa3, compile=settings.compile,
-                               warm_up=False, async_loading_frames=False)
+    predictor = build_sam3_predictor(
+        checkpoint_path=str(settings.checkpoint), version="sam3.1",
+        use_fa3=settings.use_fa3, use_rope_real=False, compile=settings.compile,
+        warm_up=False, async_loading_frames=False,
+    )
+    # The pinned shared predictor forwards this optional argument, while its
+    # multiplex model does not accept it. Adapt this instance only; reject a
+    # request to enable unsupported state offload instead of ignoring it.
+    original_init = predictor.model.init_state
+    if "offload_state_to_cpu" not in inspect.signature(original_init).parameters:
+        @wraps(original_init)
+        def compatible_init(*args, **kwargs):
+            if kwargs.pop("offload_state_to_cpu", False):
+                raise NotImplementedError("SAM3.1 multiplex does not support state offload")
+            return original_init(*args, **kwargs)
+        predictor.model.init_state = compatible_init
+    # Upstream loads the assembled model with strict=False. Check every learned
+    # tensor explicitly so a superficially successful load cannot go unnoticed.
+    import torch
+    state = torch.load(settings.checkpoint, map_location="cpu", weights_only=True)
+    state = state.get("model", state)
+    state = {key.replace("sam3_model.", "detector.", 1) if key.startswith("sam3_model.")
+             else key.replace("sam2_predictor.", "tracker.", 1) if key.startswith("sam2_predictor.")
+             else key: value for key, value in state.items()}
+    parameters = dict(predictor.model.named_parameters())
+    missing = sorted(set(parameters) - set(state))
+    mismatched = [key for key, value in parameters.items()
+                  if key in state and value.shape != state[key].shape]
+    if missing or mismatched:
+        raise RuntimeError(f"Incomplete learned checkpoint: missing={missing[:8]}, shape={mismatched[:8]}")
+    predictor.apexveil_load_audit = {"learned_tensors_checked": len(parameters),
+                                   "missing_learned_tensors": 0, "shape_mismatches": 0}
+    del state
+    return predictor
 
 
 def summarize_output(response: dict, directory: Path) -> dict:
@@ -65,7 +98,7 @@ def smoke(settings, resource: Path, output: Path, text: str, max_frames: int) ->
                 records.append(summarize_output(item, output / f"frame_{idx:06d}"))
         torch.cuda.synchronize()
         result = {"kind": "segmentation_smoke_test", "pixel_replacement": False,
-                  "model_integrity": integrity, "resource_name": resource.name,
+                  "model_integrity": integrity, "load_audit": predictor.apexveil_load_audit, "resource_name": resource.name,
                   "prompt": text, "model_load_seconds": load_seconds,
                   "inference_seconds": time.perf_counter() - started,
                   "peak_allocated_gib": torch.cuda.max_memory_allocated() / 1024**3,
