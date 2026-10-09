@@ -14,10 +14,20 @@
 - Isotropic edge-softness estimate, with strong defocus flagged for review.
 
 ## Image editor (next)
+
 - Browser upload, click/stroke prompts, undo, adjustable corners, diagnostic layers and export.
 - Add server-side Codex review after the deterministic core is reproducible.
 
-## Video validation and editor
+## Implemented bounded video experiment
+
+- Shared image compositor, current visible masks, optical-flow/RANSAC geometry fusion.
+- Short appearance/softness state, light-change response and per-frame uncertainty.
+- Original/per-frame/temporal MP4s, source-time mapping, encoded-frame-count checks.
+- Source AAC packet copying verified against the original absolute time interval.
+- Two short development shots (2 s and 2.5 s); a four-second entry-point limit.
+- Manual rejection of a false bumper track in the tree-shadow example.
+
+## Full video validation and editor (next)
 
 - Shot boundaries, stable target identities, forward/backward propagation and keyframe corrections.
 - Temporal geometry, partial/full occlusion, reappearance, defocus, motion blur and moving shadows.

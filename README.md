@@ -8,7 +8,14 @@ ApexVeil is an independent project for scene-consistent automotive image and vid
 
 ## Status
 
-**Experimental image pipeline / pre-alpha.** This repository provides a standalone environment, pinned SAM3.1 backend, model integrity checks, bounded tracking smoke tests, and an image CLI for transparent artwork replacement, blur and mosaic. Multi-target replacement requires explicit selection; uncertain geometry is flagged for review. The interactive Web editor, full video replacement, and optional AI review remain in development.
+**Experimental image and bounded-video core / pre-alpha.** The image CLI supports transparent artwork replacement, blur and mosaic. A separate experimental video entry point reuses that compositor with motion-compensated geometry, short appearance state, explicit uncertainty and copied source audio. Multi-target treatment requires explicit selection.
+
+| Capability | Current scope |
+|---|---|
+| Still-image processing | CLI, directory batches, visible masks, corner corrections, replacement/blur/mosaic |
+| Short video composition | Bounded continuous-shot experiment, hard 4-second limit; 2-second and 2.5-second development cases |
+| Full video pipeline | Shot transitions, native VFR, long jobs and the full 70-second montage remain unfinished |
+| Interactive Web editor / AI review | Planned; neither is part of the current runtime |
 
 SAM3.1 is one model backend; ApexVeil's product and source are independent of upstream model naming and any other project.
 
@@ -42,6 +49,20 @@ CUDA_VISIBLE_DEVICES=0 apexveil image /path/to/photo.jpg \
 The command saves effects, candidate masks, geometry previews and a JSON report.
 See [image pipeline documentation](docs/IMAGE_PIPELINE.md) for multi-target
 selection, manual corner overrides and current limitations.
+
+## Bounded video composition
+
+```sh
+CUDA_VISIBLE_DEVICES=0 python -m apexveil.video_pipeline /path/to/source.mp4 \
+  --start 240 --duration 2 --template /path/to/artwork.png \
+  --output outputs/video-example
+```
+
+This exports original, independent-frame and temporal comparison MP4s with frame
+and audio diagnostics. It accepts at most four seconds of an already-selected
+continuous shot. Multi-target clips require `--target-id`; visually confirmed
+false tracks may be excluded with `--exclude-ids`. See [video pipeline](docs/VIDEO_PIPELINE.md)
+and [development experiment](docs/VIDEO_EXPERIMENT_20261010.md) for limitations.
 
 ## Bounded GPU validation
 
