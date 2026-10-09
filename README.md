@@ -8,7 +8,7 @@ ApexVeil is an independent project for scene-consistent automotive image and vid
 
 ## Status
 
-**Foundation / pre-alpha.** This repository currently provides a standalone environment, pinned SAM3.1 backend, model integrity checks and bounded GPU segmentation/tracking smoke tests. The image compositor migration, interactive Web editor and optional AI review are in development. It is not yet a released image/video replacement application.
+**Experimental image pipeline / pre-alpha.** This repository provides a standalone environment, pinned SAM3.1 backend, model integrity checks, bounded tracking smoke tests, and an image CLI for transparent artwork replacement, blur and mosaic. Multi-target replacement requires explicit selection; uncertain geometry is flagged for review. The interactive Web editor, full video replacement, and optional AI review remain in development.
 
 SAM3.1 is one model backend; ApexVeil's product and source are independent of upstream model naming and any other project.
 
@@ -31,6 +31,17 @@ apexveil doctor
 ```
 
 The checkpoint lives in `models/sam3.1/`, with pinned provenance in [models/manifest.json](models/manifest.json). Model weights and user media are never committed.
+
+## Image processing
+
+```sh
+CUDA_VISIBLE_DEVICES=0 apexveil image /path/to/photo.jpg \
+  --template /path/to/artwork.png --output outputs/example --comparison
+```
+
+The command saves effects, candidate masks, geometry previews and a JSON report.
+See [image pipeline documentation](docs/IMAGE_PIPELINE.md) for multi-target
+selection, manual corner overrides and current limitations.
 
 ## Bounded GPU validation
 

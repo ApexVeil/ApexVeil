@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 license = {text = "Apache-2.0"}
 authors = [{name = "ApexVeil contributors"}]
-dependencies = ["numpy>=1.26,<2", "Pillow>=10,<13", "huggingface-hub>=0.34,<2"]
+dependencies = ["numpy>=1.26,<2", "Pillow>=10,<13", "huggingface-hub>=0.34,<2", "opencv-python-headless>=4.11,<4.12"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
