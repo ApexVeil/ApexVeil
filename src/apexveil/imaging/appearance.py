@@ -124,6 +124,7 @@ def adapt_asset(
     context_tint=None,
     ink_resolved=True,
     context_black_level=None,
+    parameter_filter=None,
 ):
     """Transfer broad exposure, shadow structure and an RGB additive floor.
 
@@ -189,9 +190,17 @@ def adapt_asset(
     black_point = float(np.median(luma(black)[valid]))
     # A dark image should remain dark. No artificial minimum white intensity.
     gain = float(np.clip((brightness - black_point) / max(ref_white, 1e-6), 0.0, 1.15))
+    parameter_diagnostics = None
+    if parameter_filter is not None:
+        scene_levels = np.percentile(lum[valid], [50, 80])
+        gain, black, tint, parameter_diagnostics = parameter_filter(
+            gain, black, tint, scene_levels
+        )
+        black_point = float(np.median(luma(black)[valid]))
     out = a * gain * field[:, :, None] * tint + black
     return srgb(out), {
         "exposure_gain_linear": gain,
+        "temporal_parameters": parameter_diagnostics,
         "black_point_linear": black_point,
         "black_field_rgb_p50_linear": np.median(black.reshape(-1, 3), axis=0).tolist(),
         "black_field_method": "local_dark_ink_lower_envelope_rgb"

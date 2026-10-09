@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw, ImageOps, ImageFont
 from .config import load_settings
 from .imaging.compositor import load_template, replace_surface, redact_surface
 from .imaging.focus import estimate_edge_softness
+from .imaging.photometry import TemporalPhotometry
 from .imaging.geometry import (
     fit_quad,
     edge_refine,
@@ -295,9 +296,16 @@ def verify_encoded_output(path, expected_frames, audio=None):
 
 
 def make_comparison(
-    original_paths, per_frame_dir, temporal_dir, frame_reports, output_dir
+    original_paths, per_frame_dir, temporal_dir, frame_reports, output_dir, labels=None
 ):
     output_dir.mkdir(exist_ok=True)
+    labels = labels or [
+        "Original / CFR segment",
+        "SAM tracked / framewise composition",
+        "SAM tracked / temporal composition",
+    ]
+    if len(labels) != 3:
+        raise ValueError("Comparison requires three labels")
     quads = [
         np.asarray(f["temporal_quad"], np.float32)
         for f in frame_reports
@@ -317,9 +325,9 @@ def make_comparison(
         board = Image.new("RGB", (1920, 420), "#14171d")
         for slot, (label, source) in enumerate(
             [
-                ("Original / CFR segment", path),
-                ("SAM tracked / framewise composition", per_frame_dir / path.name),
-                ("SAM tracked / temporal composition", temporal_dir / path.name),
+                (labels[0], path),
+                (labels[1], per_frame_dir / path.name),
+                (labels[2], temporal_dir / path.name),
             ]
         ):
             with Image.open(source) as image:
@@ -389,6 +397,7 @@ def run_video(
             "imaging/temporal.py",
             "imaging/compositor.py",
             "imaging/appearance.py",
+            "imaging/photometry.py",
             "imaging/geometry.py",
             "imaging/focus.py",
         )
@@ -536,6 +545,7 @@ def run_video(
     per_dir.mkdir(exist_ok=True)
     temporal_dir.mkdir(exist_ok=True)
     geometry, appearance = TemporalGeometry(), TemporalAppearance()
+    photometry = TemporalPhotometry(fps)
     timeline = timestamp_mapping(len(paths), fps, start)
     reports = []
     render_started = time.perf_counter()
@@ -569,6 +579,7 @@ def run_video(
         flags.extend(estimate.diagnostics["flags"])
         if "possible_cut_or_flash_state_reset" in flags:
             appearance.reset()
+            photometry.reset()
         baseline, fused = rgb.copy(), rgb.copy()
         baseline_meta, temporal_meta = {}, {}
         focus = (
@@ -584,6 +595,7 @@ def run_video(
             reference, coverage = rectified_visible_reference(
                 rgb, mask, estimate.quad, (width, height)
             )
+            current_reference = reference
             reference, sigma, appearance_diag = appearance.step(
                 reference, focus["sigma_px"]
             )
@@ -595,14 +607,17 @@ def run_video(
                     estimate.quad,
                     template,
                     sigma,
-                    appearance_reference=reference,
+                    appearance_reference=current_reference,
+                    appearance_parameter_filter=photometry.filter,
                 )
+                appearance_diag["reference_average_applied"] = False
                 temporal_meta["temporal_appearance"] = appearance_diag
                 temporal_meta["reference_visible_fraction"] = coverage
             else:
                 flags.append("replacement_skipped_no_appearance")
         else:
             appearance.reset()
+            photometry.reset()
             flags.append("replacement_skipped_no_geometry")
         edited_support = mask > 0
         redacted_other_ids = []

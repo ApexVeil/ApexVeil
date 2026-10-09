@@ -67,7 +67,14 @@ def local_bounds(mask, padding=0):
 
 
 def replace_surface(
-    rgb, mask, quad, template: Template, blur_sigma=0.35, *, appearance_reference=None
+    rgb,
+    mask,
+    quad,
+    template: Template,
+    blur_sigma=0.35,
+    *,
+    appearance_reference=None,
+    appearance_parameter_filter=None,
 ):
     """Insert a material, retaining visible-mask holes and rounded artwork."""
     if blur_sigma < 0 or blur_sigma > 20:
@@ -106,6 +113,7 @@ def replace_surface(
         ink_resolved=blur_sigma <= 1.5
         and min(np.linalg.norm(quad[(i + 1) % 4] - quad[i]) for i in range(4)) >= 48,
         context_black_level=context_detail.get("luminance_linear"),
+        parameter_filter=appearance_parameter_filter,
     )
     appearance["context"] = context_detail
     appearance["reference"] = (
