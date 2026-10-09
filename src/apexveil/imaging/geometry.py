@@ -38,6 +38,10 @@ def fit_quad(mask):
     cs, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     pts = np.concatenate(cs).reshape(-1, 2).astype(np.float32)
     lines = []
+    short_edge = min(
+        np.linalg.norm(initial[(i + 1) % 4] - initial[i]) for i in range(4)
+    )
+    allowance = min(1.0, float(short_edge) * 0.02)
     for i in range(4):
         a, b = initial[i], initial[(i + 1) % 4]
         edge = b - a
@@ -54,7 +58,7 @@ def fit_quad(mask):
         normal = np.array([-vy, vx])
         if np.dot(initial.mean(0) - point, normal) < 0:
             normal = -normal
-        lines.append((point - normal * 1.0, direction))
+        lines.append((point - normal * allowance, direction))
     corners = []
     for i in range(4):
         p, v = lines[(i - 1) % 4]
@@ -73,7 +77,7 @@ def fit_quad(mask):
     return quad.astype(np.float32), "four_robust_boundary_lines"
 
 
-def edge_refine(rgb, initial):
+def edge_refine(rgb, initial, visible_mask=None):
     q = initial.copy()
     logs = []
     x0 = max(0, int(q[:, 0].min()) - 30)
@@ -96,7 +100,10 @@ def edge_refine(rgb, initial):
             normal = np.array([-d[1], d[0]])
             if np.dot(center - p, normal) < 0:
                 normal = -normal
-            band = max(2.5, short * (0.10 if iteration == 0 else 0.035))
+            if short < 48:
+                band = max(0.75, short * (0.035 if iteration == 0 else 0.015))
+            else:
+                band = max(2.5, short * (0.10 if iteration == 0 else 0.035))
             offsets = np.linspace(-band, band, 61).astype(np.float32)
             t = np.linspace(0.12, 0.88, 100).astype(np.float32)
             base = p[None, :] + t[:, None] * (end - p)[None, :]
@@ -151,6 +158,19 @@ def edge_refine(rgb, initial):
                 {"iteration": iteration, "status": "geometry_guard_keep_previous"}
             )
             break
+        if visible_mask is not None:
+            prior_support = assess_geometry(visible_mask, q)["coverage"]
+            new_support = assess_geometry(visible_mask, candidate)["coverage"]
+            if new_support < prior_support - 0.02:
+                logs.append(
+                    {
+                        "iteration": iteration,
+                        "status": "visibility_support_guard_keep_previous",
+                        "prior_coverage": prior_support,
+                        "candidate_coverage": new_support,
+                    }
+                )
+                break
         q = candidate
         logs.append({"iteration": iteration, "edges": record})
     return q, logs

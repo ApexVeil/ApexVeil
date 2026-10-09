@@ -47,7 +47,7 @@ def prepare_surfaces(rgb, detections, directory, quad_overrides=None):
                 method, logs = "user_supplied_corners", []
             else:
                 initial, method = fit_quad(mask)
-                quad, logs = edge_refine(rgb, initial)
+                quad, logs = edge_refine(rgb, initial, visible_mask=mask)
             quality = assess_geometry(mask, quad)
             surface.update(
                 quad=quad.tolist(),
