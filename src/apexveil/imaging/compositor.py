@@ -11,7 +11,7 @@ import cv2
 import numpy as np
 from PIL import Image
 from .color import linear, srgb
-from .appearance import adapt_asset
+from .appearance import adapt_asset, estimate_context_tint
 
 
 @dataclass
@@ -66,7 +66,9 @@ def local_bounds(mask, padding=0):
     ]
 
 
-def replace_surface(rgb, mask, quad, template: Template, blur_sigma=0.35):
+def replace_surface(
+    rgb, mask, quad, template: Template, blur_sigma=0.35, *, appearance_reference=None
+):
     """Insert a material, retaining visible-mask holes and rounded artwork."""
     if blur_sigma < 0 or blur_sigma > 20:
         raise ValueError("blur_sigma must be between 0 and 20 image pixels")
@@ -82,8 +84,30 @@ def replace_surface(rgb, mask, quad, template: Template, blur_sigma=0.35):
     missing = (rect_visibility == 0).astype(np.uint8)
     if missing.any() and not missing.all():
         rect = cv2.inpaint(rect, missing * 255, 5, cv2.INPAINT_TELEA)
+    if appearance_reference is not None:
+        if (
+            appearance_reference.shape != template.rgb.shape
+            or appearance_reference.dtype != np.uint8
+        ):
+            raise ValueError(
+                "appearance_reference must be canonical RGB uint8 with the template shape"
+            )
+        light_reference = appearance_reference
+    else:
+        light_reference = rect
+    context_tint, context_detail = estimate_context_tint(rgb, mask, quad)
     asset, appearance = adapt_asset(
-        template.rgb, rect, reference_percentile=99.5, match_black=True
+        template.rgb,
+        light_reference,
+        reference_percentile=99.5,
+        match_black=True,
+        valid_mask=rect_visibility,
+        context_tint=context_tint,
+        ink_resolved=blur_sigma <= 1.5,
+    )
+    appearance["context"] = context_detail
+    appearance["reference"] = (
+        "external_temporal" if appearance_reference is not None else "current_frame"
     )
     x0, y0, x1, y1 = local_bounds(mask, 4)
     size = (x1 - x0, y1 - y0)
