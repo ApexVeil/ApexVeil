@@ -15,7 +15,8 @@ black replacement. This remains a heuristic, not recovered physical materials.
 A tested earlier variant estimated color solely from the old plate. It visibly
 contaminated a black replacement with green, especially with partial visibility
 or unresolved glyphs. The current version uses a neutral floor when less than
-65% of the plane is visible or estimated image softness exceeds 1.5 px, then
+65% of the plane is visible or estimated image softness exceeds 1.5 px, or the projected short edge is below
+48 pixels, then
 applies the scene color prior. This deliberately gives up uncertain color detail.
 The surrounding region can itself contain colored materials; this prior still
 needs a larger, diverse evaluation set.
@@ -60,7 +61,7 @@ python scripts/evaluate_compositor.py \
 ```
 
 Private final comparisons and metrics are in
-`outputs/appearance-eval-context-20261010/`. The inputs, manually estimated
+`outputs/image-compositor-20261010-final/`. The inputs, manually estimated
 corners, templates and outputs are intentionally excluded from the public repo.
 
 ## Regression checks
@@ -70,3 +71,15 @@ near-black exposure, conservative partial visibility, broad shadow contrast and
 suppression of green material contamination under neutral surroundings. Existing
 image tests still check protected occluders, rounded alpha and multi-target
 selection. These numerical checks complement, rather than replace, visual review.
+
+## Video feedback into the shared compositor
+
+Small 720p video surfaces exposed two additional errors before final export:
+unresolved ink raised the floor toward the old green face, and ratios of nearly
+black context RGB values amplified compression noise into a purple tint. The
+shared compositor now uses a low-dimensional light field for unresolved ink,
+limits its black floor using nearby dark-scene evidence, and uses neutral tint
+when context linear luminance is below 0.003. These bounds are explicitly
+heuristic. They do not solve high-frequency moving shadows or optical matting.
+Additional tests cover these observed regressions. The final still batch was
+rerun after this change; earlier development outputs are retained separately.
