@@ -36,9 +36,9 @@ acceptance, and no learned reviewer accepted the clip.
 The tree-shadow shot is a **retained failure example**. The vehicle approaches,
 changes angle and passes through moving shadows. A second SAM track was a bright
 bumper feature, not a plate: target 0 was selected and false track 1 manually
-excluded. This manual intervention is recorded. Current masks and geometry
-became unreliable under the changing appearance, including tight or incomplete
-visible regions.
+excluded. This manual intervention is recorded. The visible-mask/plane agreement became unreliable under the changing
+appearance. That quality flag alone does not establish actual foreground
+occlusion or a bad segmentation.
 
 Replacement was skipped at frames 43, 44, 60, 61, 62 and 63 (source times about
 04:38.933–04:38.967 and 04:39.500–04:39.600). Those frames retain the original
@@ -53,6 +53,18 @@ illumination and current-frame context; this is not proof that moving hard
 shadows, glare or all color flicker have been solved.
 
 ## Geometry diagnostics
+
+Post-run analysis of the 30 coverage-flagged tree frames found a median internal
+mask-hole fraction of zero. Missing coverage was primarily between the external
+mask contour and the fitted quadrilateral. Fifteen frames were already below
+0.88 coverage after `fit_quad`; fifteen additional frames crossed the threshold
+only after image-gradient refinement. Median coverage changed from 0.880 before
+refinement to 0.831 after it, with a median maximum corner shift of 2.76 px.
+This points first to low-resolution quad expansion/edge attraction, rather than
+assuming foreground holes or immediately retraining SAM. The fixed 1 px line
+allowance is a candidate for a later ablation on roughly 20 px-tall plates; no
+threshold or geometry change was made to hide the failures in these outputs.
+
 
 Median motion-relative corner residuals changed from 0.524 to 0.106 px in the
 front clip, and 1.685 to 0.358 px in the tree clip. These measure agreement with
