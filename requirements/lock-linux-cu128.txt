@@ -5,7 +5,6 @@ certifi==2026.7.22
 click==8.5.0
 cuda-bindings==12.9.4
 cuda-pathfinder==1.6.0
-decord==0.6.0
 einops==0.8.2
 fairscale==0.4.13
 filelock==3.32.3

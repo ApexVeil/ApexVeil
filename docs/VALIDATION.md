@@ -8,3 +8,5 @@ Date: 2026-10-09. Single NVIDIA H20, CUDA 12.8, PyTorch 2.10.0, no FA3 or compil
 | Three-frame video propagation | Passed; 1.51 s inference after model load; 7.38 GiB peak allocated |
 
 The image test found one target. The three consecutive driving frames retained object ID 0. These are installation smoke tests, not throughput benchmarks or proof of robust tracking, replacement quality, occlusion handling or full-video performance. User media and diagnostic overlays remain private and are not published.
+
+A direct MP4 decode/propagation smoke test also passed for three frames (1.49 s after load, 7.38 GiB peak allocated). The default video loader uses OpenCV; the optional Decord package is not required. Environment dependency validation reports no broken requirements.
