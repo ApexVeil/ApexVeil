@@ -6,43 +6,39 @@ per-frame RGB image dumps. Unreliable frames and native errors retain their time
 """
 
 from __future__ import annotations
+
 import argparse
-from collections import Counter
-from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import multiprocessing
 import os
-from pathlib import Path
 import subprocess
 import time
 import traceback
+from collections import Counter
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from pathlib import Path
+
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from .config import load_settings
-from .video_pipeline import (
-    command,
-    file_sha256,
-    probe,
-    mux_audio,
-    verify_source_audio,
-    verify_encoded_output,
-)
-from .imaging.compositor import load_template, replace_surface, redact_surface
-from .imaging.focus import estimate_edge_softness
-from .imaging.geometry import (
-    fit_quad,
-    edge_refine,
-    assess_geometry,
-    template_geometry_flags,
-)
-from .imaging.temporal import (
-    TemporalGeometry,
-    TemporalAppearance,
-    rectified_visible_reference,
-)
-from .imaging.photometry import TemporalPhotometry
 
+from .config import load_settings
+from .estimation import get_default_estimators
+from .imaging.compositor import load_template, redact_surface
+from .imaging.geometry import SurfaceGeometry
+from .imaging.photometry import TemporalPhotometry
+from .video_pipeline import (
+    LazyRGBFrames,
+    add_declared_support,
+    command,
+    estimate_geometry_track,
+    file_sha256,
+    mux_audio,
+    probe,
+    render_surface_pair,
+    verify_encoded_output,
+    verify_source_audio,
+)
 
 PASSTHROUGH = {"no_plate", "black", "transition"}
 
@@ -233,8 +229,9 @@ def full_shot_request(session_id, frame_count, confidence_threshold=0.5):
 
 
 def track_shots(root, manifest, settings):
-    from .backends.sam31 import build_predictor, summarize_output
     import torch
+
+    from .backends.sam31 import build_predictor, summarize_output
 
     torch.set_num_threads(8)
     predictor = None
@@ -292,7 +289,7 @@ def track_shots(root, manifest, settings):
                 raise RuntimeError(
                     f"Native result contains {len(frames)} frames, expected {shot['frame_count']}"
                 )
-        except Exception as exception:
+        except Exception as exception:  # noqa: BLE001 -- retain partial native output
             error = f"{type(exception).__name__}: {exception}"
             (destination / "error-trace.txt").write_text(traceback.format_exc())
         finally:
@@ -368,9 +365,11 @@ def select_primary_alias(masks, primary_ids, previous_id=None):
     return available[0] if available else None
 
 
-def render_shot(root_string, shot, template_string):
+def render_shot(root_string, shot, template_string, *, estimators=None):
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     cv2.setNumThreads(2)
+    injected_provider = estimators is not None
+    estimators = estimators or get_default_estimators()
     root = Path(root_string)
     template = load_template(Path(template_string))
     th, tw = template.alpha.shape
@@ -380,6 +379,9 @@ def render_shot(root_string, shot, template_string):
     report_path = folder / (shot["id"] + ".json")
     tracking_path = root / "tracking" / shot["id"] / "report.json"
     signature = {
+        "estimator": estimators.metadata(),
+        "provider_injected": injected_provider,
+        "geometry_policy": "per_identity_offline_bidirectional_consensus",
         "selection": {
             k: shot.get(k) for k in ["kind", "target_id", "primary_ids", "exclude_ids"]
         },
@@ -396,10 +398,14 @@ def render_shot(root_string, shot, template_string):
                 "imaging/compositor.py",
                 "imaging/temporal.py",
                 "imaging/photometry.py",
+                "imaging/offline_geometry.py",
+                "imaging/boundary.py",
+                "imaging/degradation.py",
+                "estimation.py",
             ]
         },
     }
-    if video.exists() and report_path.exists():
+    if not injected_provider and video.exists() and report_path.exists():
         cached = json.loads(report_path.read_text())
         if cached.get("signature") == signature:
             return cached
@@ -409,14 +415,57 @@ def render_shot(root_string, shot, template_string):
         else {"frames": [], "native_error": None}
     )
     records = {f["frame_index"]: f for f in tracking["frames"]}
+    primary_ids_for_shot = shot.get(
+        "primary_ids", [] if shot.get("target_id") is None else [shot["target_id"]]
+    )
+    excluded_for_shot = set(shot.get("exclude_ids", []))
+    geometry_by_id = {}
+    native_masks_by_id = {}
+    if shot["kind"] == "shot" and primary_ids_for_shot:
+        frame_sequence = LazyRGBFrames(
+            root / "shots" / (shot["id"] + ".mkv"), shot["frame_count"]
+        )
+        try:
+            shape = frame_sequence[0].shape[:2]
+            for identity in primary_ids_for_shot:
+                if identity in excluded_for_shot:
+                    continue
+                native_masks = []
+                for i in range(shot["frame_count"]):
+                    selected = [
+                        o
+                        for o in records.get(i, {}).get("objects", [])
+                        if int(o["object_id"]) == identity
+                    ]
+                    if selected:
+                        path = (
+                            root
+                            / "tracking"
+                            / shot["id"]
+                            / f"frame_{i:06d}"
+                            / selected[0]["mask"]
+                        )
+                        native_masks.append(
+                            (np.array(Image.open(path)) > 0).astype(np.uint8)
+                        )
+                    else:
+                        native_masks.append(np.zeros(shape, np.uint8))
+                native_masks_by_id[identity] = native_masks
+                geometry_by_id[identity] = estimate_geometry_track(
+                    frame_sequence,
+                    native_masks,
+                    tw / th,
+                    estimators=estimators,
+                    identity=identity,
+                )
+        finally:
+            frame_sequence.close()
     cap = cv2.VideoCapture(str(root / "shots" / (shot["id"] + ".mkv")))
     writer = raw_writer(video, 3840, 768, 30, "h264")
     header = title_pixels()
     canvas = np.zeros((768, 3840, 3), np.uint8)
     canvas[:48] = header
-    geometry = TemporalGeometry()
-    appearance = TemporalAppearance()
-    photometry = TemporalPhotometry(30)
+    photometry_by_id = {identity: TemporalPhotometry(30) for identity in geometry_by_id}
     counts = Counter()
     flag_counts = Counter()
     started = time.perf_counter()
@@ -448,12 +497,17 @@ def render_shot(root_string, shot, template_string):
                 primary = declared_primary
                 excluded = set(shot.get("exclude_ids", []))
                 support = np.zeros(rgb.shape[:2], bool)
+                baseline_support = np.zeros(rgb.shape[:2], bool)
+                temporal_support = np.zeros(rgb.shape[:2], bool)
                 alias_switched = False
                 masks = {}
                 if shot["kind"] not in PASSTHROUGH:
                     for obj in frame["objects"]:
                         oid = int(obj["object_id"])
                         if oid not in excluded:
+                            if oid in native_masks_by_id:
+                                masks[oid] = native_masks_by_id[oid][i]
+                                continue
                             masks[oid] = (
                                 np.array(
                                     Image.open(
@@ -480,86 +534,49 @@ def render_shot(root_string, shot, template_string):
                         previous_primary = primary
                     mask = masks.get(primary, np.zeros(rgb.shape[:2], np.uint8))
                     if shot["kind"] == "shot":
-                        if mask.any():
-                            try:
-                                initial, _ = fit_quad(mask)
-                                observed, _ = edge_refine(
-                                    rgb, initial, visible_mask=mask
-                                )
-                                quality = assess_geometry(mask, observed)
-                                flags.extend(quality["flags"])
-                                flags.extend(template_geometry_flags(observed, tw / th))
-                                if (
-                                    np.percentile(rgb[mask > 0].mean(axis=1) / 255, 97)
-                                    < 0.04
-                                ):
-                                    flags.append("very_dark_surface")
-                            except (
-                                ValueError,
-                                cv2.error,
-                                np.linalg.LinAlgError,
-                            ) as error:
-                                flags.append("geometry_failed")
-                                quality["error"] = str(error)
+                        if primary in geometry_by_id:
+                            observations, estimates = geometry_by_id[primary]
+                            observation, estimate = observations[i], estimates[i]
+                            observed = observation.quad
+                            quality = observation.diagnostics
+                            photometry = photometry_by_id[primary]
+                            if alias_switched:
+                                photometry.reset()
+                            (
+                                baseline,
+                                fused,
+                                baseline_meta,
+                                temporal_meta,
+                                focus,
+                                render_flags,
+                                support_a,
+                                support_b,
+                            ) = render_surface_pair(
+                                rgb,
+                                mask,
+                                observation,
+                                estimate,
+                                template,
+                                estimators,
+                                photometry,
+                                noise_seed=(shot["start_frame"] + i) * 1000003
+                                + (primary + 1) * 9176,
+                            )
+                            flags.extend(render_flags)
+                            add_declared_support(baseline_support, support_a)
+                            add_declared_support(temporal_support, support_b)
                         else:
-                            flags.append("target_not_visible_or_not_detected")
-                        reliable = observed is not None and not any(
-                            f in flags
-                            for f in [
-                                "geometry_failed",
-                                "very_dark_surface",
-                                "occluded_or_non_planar_boundary",
-                                "partially_out_of_frame",
-                                "surface_too_small",
-                                "possible_occlusion_or_extreme_foreshortening",
-                            ]
-                        )
-                        if not mask.any():
-                            reliable = False
-                        estimate = geometry.step(rgb, mask, observed, reliable)
-                        flags.extend(estimate.diagnostics["flags"])
-                        if "possible_cut_or_flash_state_reset" in flags:
-                            appearance.reset()
-                            photometry.reset()
-                        focus = (
-                            estimate_edge_softness(rgb, observed)
-                            if observed is not None
-                            else {"sigma_px": 0.35, "reliable": False}
-                        )
-                        if reliable:
-                            baseline, baseline_meta = replace_surface(
-                                rgb, mask, observed, template, focus["sigma_px"]
+                            missing = "target_not_visible_or_not_detected"
+                            estimate = SurfaceGeometry(
+                                None,
+                                mask,
+                                0.0,
+                                [missing],
+                                {"status": "needs_review", "flags": [missing]},
                             )
-                        if estimate.quad is not None and mask.any():
-                            reference, coverage = rectified_visible_reference(
-                                rgb, mask, estimate.quad, (tw, th)
-                            )
-                            current_reference = reference
-                            reference, sigma, appearance_diag = appearance.step(
-                                reference, focus["sigma_px"]
-                            )
-                            flags.extend(appearance_diag["flags"])
-                            if reference is not None:
-                                fused, temporal_meta = replace_surface(
-                                    rgb,
-                                    mask,
-                                    estimate.quad,
-                                    template,
-                                    sigma,
-                                    appearance_reference=current_reference,
-                                    appearance_parameter_filter=photometry.filter,
-                                )
-                                temporal_meta["temporal_appearance"] = appearance_diag
-                                temporal_meta["reference_visible_fraction"] = coverage
-                                temporal_meta["temporal_appearance"][
-                                    "reference_average_applied"
-                                ] = False
-                            else:
-                                flags.append("replacement_skipped_no_appearance")
-                        else:
-                            appearance.reset()
-                            photometry.reset()
-                            flags.append("replacement_skipped_no_geometry")
+                            flags.extend([missing, "replacement_skipped_no_geometry"])
+                            for state in photometry_by_id.values():
+                                state.reset()
                     other_ids = []
                     for oid, mask_other in masks.items():
                         support |= mask_other > 0
@@ -567,12 +584,20 @@ def render_shot(root_string, shot, template_string):
                             baseline, _ = redact_surface(baseline, mask_other, "blur")
                             fused, _ = redact_surface(fused, mask_other, "blur")
                             other_ids.append(oid)
+                            baseline_support |= mask_other > 0
+                            temporal_support |= mask_other > 0
                     outside = int(
-                        np.count_nonzero(np.any(baseline != rgb, axis=2) & ~support)
-                    ) + int(np.count_nonzero(np.any(fused != rgb, axis=2) & ~support))
+                        np.count_nonzero(
+                            np.any(baseline != rgb, axis=2) & ~baseline_support
+                        )
+                    ) + int(
+                        np.count_nonzero(
+                            np.any(fused != rgb, axis=2) & ~temporal_support
+                        )
+                    )
                     if outside:
                         raise RuntimeError(
-                            "Compositor changed pixels outside visible masks"
+                            "Compositor changed pixels outside declared edit support"
                         )
                     status = (
                         "needs_review"
@@ -621,6 +646,7 @@ def render_shot(root_string, shot, template_string):
                     "independent_appearance": baseline_meta,
                     "apexveil_appearance": temporal_meta,
                     "outside_edit_support_changed_pixels": 0,
+                    "estimator": estimators.metadata(),
                 }
                 stream.write(json.dumps(row) + "\n")
                 counts[status] += 1
@@ -659,7 +685,9 @@ def render_shot(root_string, shot, template_string):
     return report
 
 
-def render_all(root, manifest, template, workers=8, only_ready=False):
+def render_all(
+    root, manifest, template, workers=8, only_ready=False, *, estimators=None
+):
     validate_manifest(manifest)
     available = []
     for shot in manifest["shots"]:
@@ -671,6 +699,30 @@ def render_all(root, manifest, template, workers=8, only_ready=False):
                 continue
             raise ValueError(f"Candidate selection not reviewed: {shot['id']}")
         available.append(shot)
+    if estimators is not None:
+        results = [
+            render_shot(
+                str(root.resolve()),
+                shot,
+                str(template.resolve()),
+                estimators=estimators,
+            )
+            for shot in available
+        ]
+        save_json(
+            root / "render-progress.json",
+            {
+                "completed_shots": len(results),
+                "total_shots": len(manifest["shots"]),
+                "results": results,
+                "execution": "injected_provider_sequential",
+            },
+        )
+        if not only_ready:
+            (root / "renderer-source-snapshot.py").write_bytes(
+                Path(__file__).read_bytes()
+            )
+        return results
     context = multiprocessing.get_context("spawn")
     results = []
     with ProcessPoolExecutor(max_workers=workers, mp_context=context) as pool:

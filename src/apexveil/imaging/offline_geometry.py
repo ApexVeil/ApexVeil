@@ -97,12 +97,15 @@ def refine_shot_geometry(
     observed_quads: Sequence[np.ndarray | None] | None = None,
     max_anchor_distance: int = 12,
     identity: str | int | None = None,
+    surface_estimates: Sequence[SurfaceGeometry] | None = None,
 ) -> list[SurfaceGeometry]:
     """Return one estimate per frame, preserving each original visibility mask.
 
     Caller must supply one already associated native identity per invocation.
     Alias merging, target selection, and segmentation reruns are not performed.
     cuts[i] means a new shot begins at frame i; no anchor crosses that boundary.
+    surface_estimates accepts precomputed/injected provider observations so the
+    product does not estimate each frame twice.
     Empty masks never receive inferred visible pixels or an inferred plane.
     Frames can be a lazy sequence to bound decoding memory. Native masks must
     have the same dimensions as their corresponding RGB frames.
@@ -119,15 +122,21 @@ def refine_shot_geometry(
     cuts = set(cut_indices)
     if any(i < 0 or i >= count for i in cuts):
         raise ValueError("Cut indices must identify existing frames")
-    observations = [
-        estimate_surface_geometry(
-            frames[i],
-            masks[i],
-            template_aspect_ratio,
-            observed_quad=None if observed_quads is None else observed_quads[i],
-        )
-        for i in range(count)
-    ]
+    if surface_estimates is not None and len(surface_estimates) != count:
+        raise ValueError("Precomputed surface estimates must match frame count")
+    observations = (
+        list(surface_estimates)
+        if surface_estimates is not None
+        else [
+            estimate_surface_geometry(
+                frames[i],
+                masks[i],
+                template_aspect_ratio,
+                observed_quad=None if observed_quads is None else observed_quads[i],
+            )
+            for i in range(count)
+        ]
+    )
     motions = [None] * max(0, count - 1)
     reverse = [None] * max(0, count - 1)
     confidences = [0.0] * max(0, count - 1)
@@ -144,8 +153,12 @@ def refine_shot_geometry(
                     "difference": delta,
                 }
             else:
-                qa = observations[i - 1].diagnostics.get("candidate_quad")
-                qb = observations[i].diagnostics.get("candidate_quad")
+                qa = observations[i - 1].quad
+                qb = observations[i].quad
+                if qa is None:
+                    qa = observations[i - 1].diagnostics.get("candidate_quad")
+                if qb is None:
+                    qb = observations[i].diagnostics.get("candidate_quad")
                 qa = None if qa is None else np.asarray(qa, np.float32)
                 qb = None if qb is None else np.asarray(qb, np.float32)
                 result = _motion_pair(previous, gray, masks[i - 1], masks[i], qa, qb)
@@ -161,7 +174,11 @@ def refine_shot_geometry(
     output = []
     for i, observation in enumerate(observations):
         candidates, weights, anchors = [], [], []
-        if observation.quad is not None and observation.confidence >= 0.30:
+        if (
+            valid_quad(observation.quad)
+            and observation.confidence >= 0.30
+            and np.count_nonzero(masks[i]) >= 16
+        ):
             candidates.append(observation.quad)
             weights.append(observation.confidence)
             anchors.append(
@@ -236,7 +253,12 @@ def refine_shot_geometry(
                 consensus_scale_px=scale,
             )
             if not valid:
-                quad = observation.quad
+                quad = (
+                    observation.quad
+                    if valid_quad(observation.quad)
+                    and visible_containment(masks[i], observation.quad) >= 0.90
+                    else None
+                )
                 flags.append("invalid_consensus_keep_observation")
             if quad is not None:
                 mean_residual = float(

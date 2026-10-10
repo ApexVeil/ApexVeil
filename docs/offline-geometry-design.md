@@ -129,3 +129,52 @@ single-view completeness evidence requires additional justified image/scene
 constraints or a separately evaluated estimator; this implementation does not
 silently manufacture hidden corners.
 
+
+## Product video integration
+
+Both run_video and render_shot accept an optional Estimators bundle. The shared
+video_pipeline.estimate_geometry_track helper invokes its GeometryEstimator
+exactly once per frame, then passes precomputed SurfaceGeometry objects into
+refine_shot_geometry via surface_estimates. Provider implementations do not need
+private candidate_quad diagnostics when they supply a valid quad.
+
+PNG and video frame sequences decode lazily with a one-frame RGB cache. Montage
+processes each declared native primary ID independently before applying its
+existing alias selection rule; no mask merge or geometry state transfer occurs.
+Alias switches and missing visibility reset material-parameter filtering.
+Geometry is refined offline once, with no subsequent TemporalGeometry pass.
+Appearance uses current-frame visible reference plus TemporalPhotometry parameter
+filtering; no image-reference average is applied.
+
+The shared render_surface_pair helper preserves the existing independent and
+temporal output interfaces, injects boundary/degradation/appearance providers,
+uses a deterministic frame-and-identity noise seed, and returns the compositor's
+declared support separately from JSON metadata. Both product paths verify each
+render independently against that declared support. The historical video field
+outside_visible_masks_changed_pixels now reports its literal quantity, while
+outside_edit_support_changed_pixels is the protected-output invariant.
+Boundary needs_review propagates to frame review status. Historical clipping
+and insufficient-boundary flags that have a supported recovered quad remain in
+geometry provenance; they do not alone prevent rendering.
+
+Default montage cache signatures include estimator metadata and all relevant
+source hashes. Explicit provider injection runs in-process rather than trying
+to pickle arbitrary provider objects, and bypasses existing render-cache reuse.
+No learned provider or neural runtime was added.
+
+Product tests additionally exercise provider call counts, injected estimates
+without private diagnostics, alias-separated histories, deterministic varying
+seeds, protected support, review propagation, and lazy frame access. A real
+15-frame angled-shot montage smoke rendered all 15 frames and verified encoded
+frame count and 0.5-second duration. One frame retained boundary review status.
+Private evidence is under outputs/core-montage-vnext-smoke-20261010.
+
+
+
+The bounded run_video product route was also exercised against the same complete
+15-frame native cache, with separate original, independent, temporal and detail
+comparison encodes. All four outputs verified 15 frames and 0.5-second duration;
+all 15 target frames rendered, one retained boundary review, and the cache
+provenance check passed. The corresponding private report is
+outputs/core-video-vnext-smoke-20261010/report.json. These product smokes validate
+the executable path, not the quality of the complete 70-second diagnostic export.
