@@ -144,3 +144,49 @@ def test_timeout_kills_process_group_and_cannot_accept_reply(tmp_path, monkeypat
     assert killed == [412]
     assert advice is None
     assert report["timed_out"]
+
+
+@pytest.mark.parametrize(
+    "prefix,model",
+    [("luna", "gpt-6-luna"), ("sol", "gpt-6.1-sol"), ("astra", "gpt-6-astra")],
+)
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_every_selection_reaches_exact_cli_model_and_effort(
+    tmp_path, monkeypatch, prefix, model, effort
+):
+    image = tmp_path / "source.png"
+    image.write_bytes(b"input")
+
+    class Process:
+        returncode = 0
+
+        def __init__(self, args, **kwargs):
+            assert args[args.index("--model") + 1] == model
+            assert args[args.index("-c") + 1] == f'model_reasoning_effort="{effort}"'
+            self.reply = args[args.index("-o") + 1]
+
+        def communicate(self, *, input, timeout):
+            assert 180 <= timeout <= 600
+            from pathlib import Path
+
+            Path(self.reply).write_text(json.dumps(proposal()))
+
+    monkeypatch.setattr(subprocess, "Popen", Process)
+    _, record = CodexSceneAdvisor(profile=f"{prefix}-{effort}").run(
+        tmp_path / "job", "inspect", [image]
+    )
+    assert record["requested_model"] == model
+    assert record["reasoning_effort"] == effort
+    assert record["status"] == "proposal_available"
+
+
+def test_arbitrary_model_or_effort_cannot_be_injected():
+    from apexveil.backends.codex_advisor import advisor_profile
+
+    for model, effort in [
+        ("gpt-unknown", "medium"),
+        ("gpt-6-astra", "arbitrary"),
+        ("gpt-6-luna", None),
+    ]:
+        with pytest.raises((ValueError, TypeError)):
+            advisor_profile(model, effort)

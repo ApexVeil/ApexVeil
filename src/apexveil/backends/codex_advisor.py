@@ -16,7 +16,31 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-PROFILES = {"luna-medium": "gpt-6-luna", "sol-medium": "gpt-6.1-sol"}
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+MODEL_OPTIONS = (
+    {"id": "gpt-6-luna", "label": "GPT-6 Luna", "prefix": "luna"},
+    {"id": "gpt-6.1-sol", "label": "GPT-6.1 Sol", "prefix": "sol"},
+    {"id": "gpt-6-astra", "label": "GPT-6 Astra", "prefix": "astra"},
+)
+PROFILES = {
+    f"{m['prefix']}-{effort}": m["id"] for m in MODEL_OPTIONS for effort in EFFORTS
+}
+EFFORT_TIMEOUTS = {"low": 180, "medium": 180, "high": 300, "xhigh": 480, "max": 600}
+
+
+def advisor_profile(model, effort):
+    if not isinstance(model, str) or not isinstance(effort, str):
+        raise TypeError("模型与思考等级需为字符串。")
+    option = next((m for m in MODEL_OPTIONS if m["id"] == model), None)
+    if option is None or effort not in EFFORTS:
+        raise ValueError("不支持的模型或思考等级。")
+    return f"{option['prefix']}-{effort}"
+
+
+def profile_selection(profile):
+    if profile not in PROFILES:
+        raise ValueError(f"Unknown Codex profile: {profile}")
+    return PROFILES[profile], profile.rsplit("-", 1)[1]
 
 
 def _object(properties):
@@ -212,14 +236,18 @@ def to_source_geometry(advice, crop_xyxy, *, source_size):
 @dataclass
 class CodexSceneAdvisor:
     profile: str = "luna-medium"
-    timeout_seconds: float = 180
+    timeout_seconds: float | None = None
     proxy_url: str | None = None
     executable: str = "codex"
 
     def run(self, job_dir, prompt, images):
-        if self.profile not in PROFILES:
-            raise ValueError(f"Unknown Codex profile: {self.profile}")
-        if not 1 <= self.timeout_seconds <= 600:
+        model, effort = profile_selection(self.profile)
+        timeout = (
+            self.timeout_seconds
+            if self.timeout_seconds is not None
+            else EFFORT_TIMEOUTS[effort]
+        )
+        if not 1 <= timeout <= 600:
             raise ValueError("Advisor timeout must be within 1..600 seconds")
         job = Path(job_dir).resolve()
         job.mkdir(parents=True, exist_ok=True)
@@ -231,7 +259,6 @@ class CodexSceneAdvisor:
         schema_path = job / "response.schema.json"
         schema_path.write_text(json.dumps(guidance_schema(), indent=2))
         (job / "prompt.txt").write_text(prompt)
-        model = PROFILES[self.profile]
         reply = job / "reply.json"
         args = [
             self.executable,
@@ -246,7 +273,7 @@ class CodexSceneAdvisor:
             "--model",
             model,
             "-c",
-            'model_reasoning_effort="medium"',
+            f'model_reasoning_effort="{effort}"',
             "--json",
             "--output-schema",
             str(schema_path),
@@ -286,7 +313,7 @@ class CodexSceneAdvisor:
                 launch_error = f"{type(error).__name__}: {error}"
             else:
                 try:
-                    process.communicate(input=prompt, timeout=self.timeout_seconds)
+                    process.communicate(input=prompt, timeout=timeout)
                     code = process.returncode
                 except subprocess.TimeoutExpired:
                     timed_out = True
@@ -297,7 +324,8 @@ class CodexSceneAdvisor:
                     code = process.wait()
         record = {
             "requested_model": model,
-            "reasoning_effort": "medium",
+            "reasoning_effort": effort,
+            "timeout_seconds": timeout,
             "profile": self.profile,
             "elapsed_seconds": round(time.monotonic() - started, 3),
             "exit_code": code,

@@ -6,10 +6,6 @@ After installation, run `python -m pytest -q` and `ruff check src tests --select
 
 Configure any required network proxy in the shell that installs dependencies; do not hard-code a host's proxy, SSH address, or account into source. Hugging Face authentication stays in the operator's normal credential store.
 
-For a future GUI listening on port 7860:
-
-```sh
-ssh -N -L 127.0.0.1:7860:127.0.0.1:7860 your-gpu-host
-```
-
-Then open http://127.0.0.1:7860. The SSH connection is independent of ApexVeil. The editing server itself is on the roadmap and is not part of this foundation release.
+For the personal Studio and ordinary SSH forwarding, see [STUDIO.md](STUDIO.md).
+The server binds to loopback and keeps one persistent GPU worker. This experiment
+is not publicly hosted; the operator chooses the optional Codex profile at launch.

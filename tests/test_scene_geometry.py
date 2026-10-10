@@ -220,3 +220,30 @@ def test_substantial_separated_visibility_is_never_microfiltered():
     assert all(
         c.diagnostics["fit_only_ignored_microcomponent_pixels"] == 0 for c in candidates
     )
+
+
+def test_isolated_prediction_pixels_do_not_expand_cropped_plane():
+    from apexveil.imaging.scene_geometry import (
+        propose_scene_geometry,
+        select_scene_geometry,
+    )
+
+    mask = np.zeros((160, 240), np.uint8)
+    mask[50:85, 218:] = 1
+    rgb = np.full((160, 240, 3), 100, np.uint8)
+    anchor = {
+        "quad": np.array([[100, 50], [205, 50], [205, 84], [100, 84]], np.float32)
+    }
+    clean = select_scene_geometry(
+        propose_scene_geometry(rgb, mask, aspect=3, anchors=[anchor])
+    )
+    noisy = mask.copy()
+    noisy[115, 226] = 1
+    original = noisy.copy()
+    fitted = select_scene_geometry(
+        propose_scene_geometry(rgb, noisy, aspect=3, anchors=[anchor])
+    )
+    assert fitted is not None and clean is not None
+    np.testing.assert_allclose(fitted.quad, clean.quad, atol=0.2)
+    np.testing.assert_array_equal(noisy, original)
+    assert fitted.diagnostics["fit_only_ignored_microcomponent_pixels"] == 1

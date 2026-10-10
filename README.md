@@ -16,7 +16,7 @@ ApexVeil is an independent project for scene-consistent automotive image and vid
 | Short video composition | Bounded continuous-shot experiment; native SAM tracking and offline geometry |
 | Reviewed montage | Manifest-driven shots and source audio; a 70-second, 30 fps development montage. Automatic shot selection and native VFR are not implemented |
 | Optional Codex scene advice | Experimental source-bound proposal → render → visual review loop; bounded retries, existing operator login |
-| Interactive Web editor | Planned; diagnostic result pages are available |
+| Personal Web Studio | Upload, target selection and download for images and bounded continuous-shot experiments; loopback + SSH forwarding |
 
 SAM3.1 is one model backend; ApexVeil's product and source are independent of upstream model naming and any other project.
 
@@ -65,6 +65,18 @@ continuous shot. Multi-target clips require `--target-id`; visually confirmed
 false tracks may be excluded with `--exclude-ids`. See [video pipeline](docs/VIDEO_PIPELINE.md)
 and [development experiment](docs/VIDEO_EXPERIMENT_20261010.md) for limitations.
 
+## Personal Web Studio
+
+```sh
+python -m apexveil.web --gpu 0 --port 18768 \
+  --template /path/to/artwork.png --advisor-profile sol-medium
+```
+
+Access the server through SSH forwarding; upload, select a plate and download the
+result. Image processing and up-to-eight-second continuous-shot trials share the
+scene core. See [Studio operation and timing](docs/STUDIO.md). Public hosting and
+invitations are not enabled.
+
 ## Scene solver and optional AI guidance
 
 A newer [scene solver](docs/SCENE_SOLVER.md) separates the complete plane from
@@ -72,7 +84,7 @@ visible pixels, image clipping and foreground evidence. It shares one determinis
 renderer between still images and video frames. Optional Codex guidance supplies
 bounded geometry and lighting data; it does not redraw the supplied artwork or
 modify renderer code. This opt-in developer workflow is not yet the default image
-or montage command, and the interactive editor remains planned.
+or montage command. The personal [Web Studio](docs/STUDIO.md) uses this new core for interactive trials.
 
 ## Bounded GPU validation
 

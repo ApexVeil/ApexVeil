@@ -148,3 +148,36 @@ def test_scene_pipeline_forwards_temporal_appearance_filter():
     assert report["compositor"]["appearance"]["temporal_parameters"][
         "test_temporal_filter"
     ]
+
+
+def test_video_filters_run_before_ink_fit_and_keep_visibility_immutable():
+    from dataclasses import replace
+
+    rgb, mask, template, quad = scene()
+    before = mask.copy()
+    calls = []
+
+    def focus(estimate, **context):
+        assert 0 < context["visible_fraction"] <= 1
+        calls.append("focus")
+        return replace(estimate, sigma_px=2.0)
+
+    def material(estimate, levels, **context):
+        calls.append("material")
+        assert context["source_reference"].shape == template.rgb.shape
+        assert context["valid_mask"].shape == template.alpha.shape
+        return replace(estimate, gain=0.25)
+
+    _, report, _ = pipeline.solve_scene(
+        rgb,
+        mask,
+        template,
+        selected_candidate=quad,
+        degradation_estimate_filter=focus,
+        appearance_estimate_filter=material,
+    )
+    assert calls == ["focus", "material"]
+    assert report["rendered"]
+    assert report["degradation_estimate_filter_supplied"]
+    assert report["compositor"]["blur_sigma_px"] == 2.0
+    np.testing.assert_array_equal(mask, before)

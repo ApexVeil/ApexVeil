@@ -25,7 +25,7 @@ class SceneGeometryCandidate:
     protected_mask: np.ndarray | None = None
 
 
-def _line_quad(mask):
+def _fit_visibility(mask):
     binary = (mask > 0).astype(np.uint8)
     # Fit-only robustness: a few disconnected single-pixel predictions can
     # pull a hull hundreds of pixels away. Keep the original mask everywhere
@@ -36,10 +36,15 @@ def _line_quad(mask):
     areas = stats[1:, cv2.CC_STAT_AREA]
     tiny_ids = np.flatnonzero(areas <= 3) + 1
     ignored = int(areas[tiny_ids - 1].sum()) if len(tiny_ids) else 0
-    if ignored and ignored <= float(areas.sum()) * 0.002:
+    if ignored and ignored <= float(areas.sum()) * 0.01:
         local[np.isin(labels, tiny_ids)] = 0
     else:
         ignored = 0
+    return binary, ignored
+
+
+def _line_quad(mask):
+    binary, ignored = _fit_visibility(mask)
     q, method = fit_quad(binary)
     # fit_quad includes an outward optical allowance. A physical UV hypothesis
     # must estimate the line itself: its height controls hidden-side completion.
@@ -316,16 +321,15 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
     anchors = list(anchors or [])[:8]
     if np.count_nonzero(mask) < 16:
         return []
-    fragment, method, ignored_microcomponents = _line_quad(mask)
-    labels = _edge_classes(mask, fragment, guidance)
+    fit_mask, ignored_microcomponents = _fit_visibility(mask)
+    fragment, method, _ = _line_quad(fit_mask)
+    labels = _edge_classes(fit_mask, fragment, guidance)
     censored = [i for i, label in enumerate(labels) if label != "surface"]
     physical_aspect = float(guidance.get("physical_aspect", aspect))
     if not np.isfinite(physical_aspect) or physical_aspect <= 0:
         raise ValueError("physical_aspect must be finite and positive")
     proposals = []
-    contours, _ = cv2.findContours(
-        (mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE
-    )
+    contours, _ = cv2.findContours(fit_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     points = np.concatenate(contours).reshape(-1, 2).astype(np.float32)
     short = min(np.linalg.norm(fragment[(i + 1) % 4] - fragment[i]) for i in range(4))
     observed_edges = []
@@ -413,6 +417,19 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
         eligible=not censored,
     )
 
+    # A low-resolution boundary fit can collapse onto a glyph/rounded corner.
+    # Keep a containing, oriented full-visible fallback rather than dropping a
+    # valid native detection. It is deliberately ranked below supported lines.
+    if not censored and visible_containment(fit_mask, fragment) < 0.88:
+        outer = cv2.boxPoints(cv2.minAreaRect(points))
+        add(
+            outer,
+            0.62,
+            ["containing_oriented_boundary_fallback"],
+            ["low_resolution_projective_shape_unresolved"],
+            {"retry_reason": "line_fit_missed_current_visible_surface"},
+        )
+
     supplied = guidance.get("candidate_quads", [])[:6]
     rejected_guidance = []
     for supplied_index, supplied_quad in enumerate(supplied):
@@ -458,7 +475,9 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
             "direct_anchor_not_adjacent_chain": True,
         }
         if len(censored) == 1 and labels[censored[0]] == "crop":
-            edge_completion = _anchor_opposite_edge_completion(mask, aq, censored[0])
+            edge_completion = _anchor_opposite_edge_completion(
+                fit_mask, aq, censored[0]
+            )
             if edge_completion is not None:
                 add(
                     edge_completion,

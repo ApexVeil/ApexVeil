@@ -81,6 +81,8 @@ def replace_surface(
     *,
     appearance_reference=None,
     appearance_parameter_filter=None,
+    appearance_estimate_filter=None,
+    degradation_estimate_filter=None,
     appearance_estimate=None,
     boundary_estimate=None,
     protected_mask=None,
@@ -100,6 +102,15 @@ def replace_surface(
     degradation = degradation_estimate or estimators.degradation.estimate(
         rgb, mask, quad
     )
+    if degradation_estimate_filter is not None:
+        degradation = degradation_estimate_filter(
+            degradation,
+            visible_fraction=min(
+                1.0,
+                float(np.count_nonzero(mask))
+                / max(cv2.contourArea(np.asarray(quad, np.float32)), 1.0),
+            ),
+        )
     # None delegates entirely to the selected estimator. Every numeric value,
     # including zero, is an explicit override and must not be silently raised.
     blur_sigma = float(degradation.sigma_px if blur_sigma is None else blur_sigma)
@@ -151,6 +162,15 @@ def replace_surface(
         parameter_filter=None,
     )
     estimated_appearance = apply_scene_guidance(estimated_appearance, scene_guidance)
+    if appearance_estimate_filter is not None:
+        source_levels = np.percentile(luma(linear(rect))[rect_visibility > 0], [50, 80])
+        estimated_appearance = appearance_estimate_filter(
+            estimated_appearance,
+            source_levels,
+            valid_mask=rect_visibility,
+            source_reference=rect,
+            context_black_level=context_detail.get("luminance_linear"),
+        )
     if appearance_parameter_filter is not None:
         source_levels = np.percentile(luma(linear(rect))[rect_visibility > 0], [50, 80])
         gain, veil, tint, temporal = appearance_parameter_filter(

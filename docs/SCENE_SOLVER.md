@@ -4,7 +4,8 @@ The experimental scene solver addresses cases where segmentation is usable but
 replacement shrinks inside the original surface, treats an occluder as a plate
 edge, or rejects a plane because part of it is outside the image. It is an opt-in
 developer API and evidence-pack workflow; existing image/montage CLI commands
-have not all migrated to it. It is not a finished interactive editor.
+have not all migrated to it. A personal upload/selection interface is now available via [Studio](STUDIO.md);
+it is not a public multi-user editor.
 
 ## Shared core
 
@@ -49,10 +50,12 @@ This is not yet a universal tracker or a fully automatic montage processor.
 
 The operator needs a working `codex` executable and their own existing login.
 No API key is injected and no paid provider/model fallback is attempted. The
-profiles request `gpt-6-luna` or `gpt-6.1-sol`, with medium reasoning. Availability
-is account/runtime dependent: the development host accepted Luna and explicitly
-rejected Sol for its ChatGPT-authenticated CLI. A Sol App-subagent comparison is
-separate evidence, not a successful CLI integration.
+profiles request `gpt-6-luna`, `gpt-6.1-sol` or `gpt-6-astra`, with low, medium,
+high, xhigh or max reasoning. Availability is account/runtime dependent: CLI
+0.157.1 on the development host accepted Luna but rejected Sol. After the
+operator upgraded to 0.162.1, real image-guidance requests for Luna and Sol at
+medium reasoning succeeded with the existing ChatGPT login. Earlier App-subagent
+Sol comparisons remain separate provenance.
 
 A source-bound case pack contains native masks, full/context/tight source images,
 a coordinate ruler, an approved template, and (for video) a nearby clearer frame
