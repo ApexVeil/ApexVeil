@@ -15,7 +15,8 @@ ApexVeil is an independent project for scene-consistent automotive image and vid
 | Still-image processing | CLI, directory batches, visible masks, corner corrections, replacement/blur/mosaic |
 | Short video composition | Bounded continuous-shot experiment; native SAM tracking and offline geometry |
 | Reviewed montage | Manifest-driven shots and source audio; a 70-second, 30 fps development montage. Automatic shot selection and native VFR are not implemented |
-| Interactive Web editor / AI review | Planned; neither is part of the current runtime |
+| Optional Codex scene advice | Experimental source-bound proposal → render → visual review loop; bounded retries, existing operator login |
+| Interactive Web editor | Planned; diagnostic result pages are available |
 
 SAM3.1 is one model backend; ApexVeil's product and source are independent of upstream model naming and any other project.
 
@@ -63,6 +64,15 @@ and audio diagnostics. It accepts at most four seconds of an already-selected
 continuous shot. Multi-target clips require `--target-id`; visually confirmed
 false tracks may be excluded with `--exclude-ids`. See [video pipeline](docs/VIDEO_PIPELINE.md)
 and [development experiment](docs/VIDEO_EXPERIMENT_20261010.md) for limitations.
+
+## Scene solver and optional AI guidance
+
+A newer [scene solver](docs/SCENE_SOLVER.md) separates the complete plane from
+visible pixels, image clipping and foreground evidence. It shares one deterministic
+renderer between still images and video frames. Optional Codex guidance supplies
+bounded geometry and lighting data; it does not redraw the supplied artwork or
+modify renderer code. This opt-in developer workflow is not yet the default image
+or montage command, and the interactive editor remains planned.
 
 ## Bounded GPU validation
 

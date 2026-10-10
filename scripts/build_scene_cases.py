@@ -172,7 +172,9 @@ def _save_native_masks(case_dir: Path, masks: dict[int, np.ndarray]):
     return records
 
 
-def _load_image_case(repo: Path, case_id: str, common_template: Path):
+def _load_image_case(
+    repo: Path, case_id: str, common_template: Path, output_root: Path
+):
     automatic_root = repo / IMAGE_AUTOMATIC
     automatic_report_path = automatic_root / case_id / "report.json"
     automatic = json.loads(automatic_report_path.read_text())
@@ -230,7 +232,7 @@ def _load_image_case(repo: Path, case_id: str, common_template: Path):
 
     crop = _expand_crop_minimum(crop, rgb.shape[:2], (1400, 1100))
     tight_crop = _tight_crop_for_target(target_mask, rgb.shape[:2])
-    case_dir = repo / DEFAULT_OUTPUT / case_id
+    case_dir = output_root / case_id
     case_dir.mkdir(parents=True, exist_ok=True)
     original_copy = case_dir / f"source-original{source_path.suffix.lower()}"
     shutil.copy2(source_path, original_copy)
@@ -440,7 +442,7 @@ def _anchor_for_shot(cache_root: Path, shot: dict, target_id: int):
     }
 
 
-def _make_video_case(repo, global_index: int, common_template: Path):
+def _make_video_case(repo, global_index: int, common_template: Path, output_root: Path):
     cache_root = repo / VIDEO_CACHE
     source_manifest = cache_root / "shot_manifest.json"
     source_info = json.loads(source_manifest.read_text())
@@ -499,7 +501,7 @@ def _make_video_case(repo, global_index: int, common_template: Path):
         minimum_padding=128,
     )
     case_id = f"video-gf{global_index:05d}"
-    case_dir = repo / DEFAULT_OUTPUT / case_id
+    case_dir = output_root / case_id
     case_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(source).save(case_dir / "source-full.png", compress_level=2)
     _save_crop(source, crop, case_dir / "source-crop-native.png")
@@ -779,9 +781,11 @@ def build_case_packs(repo_root: Path, output_root: Path):
 
     cases = []
     for case_id in IMAGE_CASES:
-        cases.append(_load_image_case(repo_root, case_id, common_template))
+        cases.append(_load_image_case(repo_root, case_id, common_template, output_root))
     for global_index in VIDEO_GLOBAL_FRAMES:
-        cases.append(_make_video_case(repo_root, global_index, common_template))
+        cases.append(
+            _make_video_case(repo_root, global_index, common_template, output_root)
+        )
     for case in cases:
         case["case_dir"] = case["case_id"]
         _write_json(output_root / case["case_id"] / "manifest.json", case)
