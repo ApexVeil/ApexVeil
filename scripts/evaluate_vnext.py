@@ -57,6 +57,30 @@ def _write_json(path: Path, value: dict) -> None:
     temporary.replace(path)
 
 
+def _capture_source_snapshot(repo_root: Path) -> dict:
+    """Bind a render to the exact core files, script, and Git revision."""
+    repo_root = Path(repo_root).resolve()
+    commit = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    source_files = sorted((repo_root / "src" / "apexveil").rglob("*.py"))
+    source_files.append(Path(__file__).resolve())
+    hashes = {
+        path.relative_to(repo_root).as_posix(): file_sha256(path)
+        for path in source_files
+    }
+    return {"git_commit": commit, "files_sha256": hashes}
+
+
+def _source_snapshot_changed(start: dict, end: dict) -> bool:
+    return start.get("git_commit") != end.get("git_commit") or start.get(
+        "files_sha256"
+    ) != end.get("files_sha256")
+
+
 def _decode_shot(path: Path, expected_count: int) -> list[np.ndarray]:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
@@ -696,7 +720,10 @@ def _stop_encoder(process, terminate=False):
         raise RuntimeError(f"Diagnostic video encoding failed: {error[-3000:]}")
 
 
-def _finalize_video(silent_path, output_path, audio_source, expected_frames, full_run):
+def _prepare_final_video(
+    silent_path, output_path, audio_source, expected_frames, full_run
+):
+    """Mux and verify a pending file without publishing it at the final path."""
     pending = output_path.with_name(f".{output_path.name}.pending.mp4")
     pending.unlink(missing_ok=True)
     try:
@@ -706,10 +733,7 @@ def _finalize_video(silent_path, output_path, audio_source, expected_frames, ful
         else:
             verification = verify_encoded_output(silent_path, expected_frames)
             silent_path.replace(pending)
-        pending.replace(output_path)
-        if full_run:
-            silent_path.unlink(missing_ok=True)
-        return verification
+        return pending, verification
     except Exception:
         pending.unlink(missing_ok=True)
         raise
@@ -753,6 +777,11 @@ def render_vnext(
     template = load_template(template_path)
     estimators = estimators or get_default_estimators()
     output.mkdir(parents=True, exist_ok=True)
+    repo_root = Path(__file__).resolve().parents[1]
+    source_snapshot = _capture_source_snapshot(repo_root)
+    snapshot_path = output / "source-snapshot.json"
+    _write_json(snapshot_path, source_snapshot)
+    source_snapshot_sha256 = file_sha256(snapshot_path)
     panel_width, panel_height = manifest.get("native_panel_dimensions", [1280, 720])
     width, height = int(panel_width) * 3, int(panel_height) + HEADER_HEIGHT
     fps = int(manifest["fps"])
@@ -775,6 +804,13 @@ def render_vnext(
         "complete_timeline": False,
         "source_manifest": str(manifest_path),
         "source_manifest_sha256": file_sha256(manifest_path),
+        "renderer_git_commit": source_snapshot["git_commit"],
+        "renderer_source_snapshot": snapshot_path.name,
+        "renderer_source_snapshot_sha256": source_snapshot_sha256,
+        "renderer_script_sha256": source_snapshot["files_sha256"][
+            Path(__file__).resolve().relative_to(repo_root).as_posix()
+        ],
+        "source_changed_during_evaluation": None,
         "source_sha256": manifest["source_sha256"],
         "source_interval_seconds": manifest["source_interval_seconds"],
         "fps": fps,
@@ -853,14 +889,29 @@ def render_vnext(
         if frame_cursor != count:
             raise RuntimeError(f"Rendered {frame_cursor} frames; expected {count}")
         report["encoded_verification"] = {}
+        pending_paths = {}
         for variant in ("replace", "blur"):
-            report["encoded_verification"][variant] = _finalize_video(
-                silent_paths[variant],
-                final_paths[variant],
-                audio_source if full_run else None,
-                count,
-                full_run,
+            pending_paths[variant], report["encoded_verification"][variant] = (
+                _prepare_final_video(
+                    silent_paths[variant],
+                    final_paths[variant],
+                    audio_source if full_run else None,
+                    count,
+                    full_run,
+                )
             )
+        ending_snapshot = _capture_source_snapshot(repo_root)
+        source_changed = _source_snapshot_changed(source_snapshot, ending_snapshot)
+        report["source_changed_during_evaluation"] = source_changed
+        report["source_snapshot_after"] = ending_snapshot
+        if source_changed:
+            raise RuntimeError(
+                "Renderer source changed during evaluation; verified outputs were withheld"
+            )
+        for variant, pending in pending_paths.items():
+            pending.replace(final_paths[variant])
+            if full_run:
+                silent_paths[variant].unlink(missing_ok=True)
         report["output_paths"] = {key: str(path) for key, path in final_paths.items()}
         report["status"] = (
             "completed_unreviewed"
@@ -885,6 +936,7 @@ def render_vnext(
         for path in output.glob(".*.pending.mp4"):
             path.unlink(missing_ok=True)
         report["status"] = "failed"
+        report["complete_timeline"] = False
         report["failure"] = f"{type(error).__name__}: {error}"
         _write_json(output / "vnext-report.json", report)
         raise

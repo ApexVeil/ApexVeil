@@ -5,7 +5,7 @@ import hashlib
 import html
 import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -568,8 +568,18 @@ def export_image_diagnostics(
     return report
 
 
+def _safe_local_href(value):
+    path = str(value).replace("\\\\", "/")
+    parsed = PurePosixPath(path)
+    if not path or parsed.is_absolute() or ":" in path:
+        return None
+    if any(part in {"", ".", ".."} for part in parsed.parts):
+        return None
+    return html.escape(path, quote=True)
+
+
 def write_image_index(output_dir, reports, title="ApexVeil diagnostics"):
-    """Create a self-contained local index with a Replace/Blur selector per image."""
+    """Create a local index showing review state, output downloads, and panels."""
     root = Path(output_dir)
     cards = []
     for report in reports:
@@ -577,22 +587,71 @@ def write_image_index(output_dir, reports, title="ApexVeil diagnostics"):
         names = report["diagnostics"]
         provenance = report.get("provenance", {})
         category = html.escape(str(provenance.get("category", "unspecified")))
+        status = html.escape(str(provenance.get("status", "not provided")))
         correction = provenance.get("correction", {})
         note = html.escape(str(correction.get("note", "")))
+        flags = provenance.get("flags") or []
+        if isinstance(flags, str):
+            flags = [flags]
+        if flags:
+            flag_html = (
+                "<ul>"
+                + "".join(f"<li>{html.escape(str(flag))}</li>" for flag in flags)
+                + "</ul>"
+            )
+        else:
+            flag_html = "<p>No review flags recorded.</p>"
+        links = provenance.get("links") or {}
+        if not links:
+            # Standalone image-pipeline exports are stored beside the index.
+            links = {
+                key: relative
+                for key, relative in {
+                    "replace": "replace.png",
+                    "blur": "blur.png",
+                    "report": "report.json",
+                }.items()
+                if (root / relative).is_file()
+            }
+            if "report" not in links:
+                diagnostic_report = f"{stem}-report.json"
+                if (root / diagnostic_report).is_file():
+                    links["report"] = diagnostic_report
+        link_labels = {
+            "replace": "Download full-resolution Replace PNG",
+            "blur": "Download full-resolution Blur PNG",
+            "report": "Open report JSON",
+        }
+        link_html = []
+        for key, label in link_labels.items():
+            href = _safe_local_href(links.get(key, ""))
+            if href:
+                download = " download" if key in {"replace", "blur"} else ""
+                link_html.append(f'<a href="{href}"{download}>{html.escape(label)}</a>')
+        links_markup = (
+            '<p class="downloads">' + " · ".join(link_html) + "</p>"
+            if link_html
+            else ""
+        )
+        full_replace = html.escape(names["full_replace"], quote=True)
+        full_blur = html.escape(names["full_blur"], quote=True)
+        detail_replace = html.escape(names["detail_replace"], quote=True)
+        detail_blur = html.escape(names["detail_blur"], quote=True)
         card = (
             f"<article><h2>{html.escape(stem)}</h2>"
-            f"<p>Provenance: {category}. {note}</p>"
+            f"<p>Provenance: {category}. Review status: <strong>{status}</strong>. {note}</p>"
+            f"{flag_html}{links_markup}"
             '<label>Right output <select><option value="replace">Replace</option><option value="blur">Blur</option></select></label>'
-            f'<img loading="lazy" src="{html.escape(names["full_replace"], quote=True)}" data-replace="{html.escape(names["full_replace"], quote=True)}" data-blur="{html.escape(names["full_blur"], quote=True)}" alt="{html.escape(stem)} full view">'
-            f'<img loading="lazy" src="{html.escape(names["detail_replace"], quote=True)}" data-replace="{html.escape(names["detail_replace"], quote=True)}" data-blur="{html.escape(names["detail_blur"], quote=True)}" alt="{html.escape(stem)} target detail">'
-            "<p>RGB | SAM 3.1 colored raw mask | ApexVeil. Every returned mask ID remains visible, including excluded IDs; raw masks are model outputs, not ground truth.</p></article>"
+            f'<img loading="lazy" src="{full_replace}" data-replace="{full_replace}" data-blur="{full_blur}" alt="{html.escape(stem)} full view">'
+            f'<img loading="lazy" src="{detail_replace}" data-replace="{detail_replace}" data-blur="{detail_blur}" alt="{html.escape(stem)} target detail">'
+            "<p>RGB | SAM 3.1 colored raw mask | ApexVeil. Every returned mask ID remains visible, including excluded IDs; raw masks are model outputs, not ground truth. Product quality acceptance has not been run.</p></article>"
         )
         cards.append(card)
     page = (
         '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">'
         f"<title>{html.escape(title)}</title>"
-        "<style>body{margin:0;background:#101317;color:#eef0f2;font:15px/1.55 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:28px}article{border-top:1px solid #343a42;padding:20px 0}p,label{color:#bac1c9}img{display:block;width:100%;margin:14px 0}select{margin:8px;padding:6px;background:#252b33;color:white}</style>"
-        f"<main><h1>{html.escape(title)}</h1><p>Choose Replace or Blur for the right panel. Each image includes full-view and target-detail panels.</p>{''.join(cards)}</main>"
+        "<style>body{margin:0;background:#101317;color:#eef0f2;font:15px/1.55 system-ui,sans-serif}main{max-width:1500px;margin:auto;padding:28px}article{border-top:1px solid #343a42;padding:20px 0}p,label{color:#bac1c9}img{display:block;width:100%;margin:14px 0}select{margin:8px;padding:6px;background:#252b33;color:white}.downloads a{color:#ffb486;margin-right:8px}li{color:#e3c6a8}</style>"
+        f"<main><h1>{html.escape(title)}</h1><p>Choose Replace or Blur for the right panel. Each image includes full-view and target-detail panels. Review status and flags are shown for every image.</p>{''.join(cards)}</main>"
         '<script>for(const a of document.querySelectorAll("article")){const s=a.querySelector("select");s.onchange=()=>a.querySelectorAll("img").forEach(i=>i.src=i.dataset[s.value])}</script></html>'
     )
     (root / "index.html").write_text(page, encoding="utf-8")

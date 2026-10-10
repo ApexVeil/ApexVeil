@@ -21,6 +21,7 @@ from scripts.evaluate_vnext import (
     _frame_seed,
     _is_replaceable,
     _render_replacement,
+    _source_snapshot_changed,
     render_vnext,
 )
 
@@ -167,6 +168,23 @@ def test_five_frame_subset_exports_replace_and_blur_with_raw_masks(tmp_path):
     assert result["complete_timeline"] is False
     assert result["gpu_used"] is False
     assert result["sam_inference_run"] is False
+    snapshot_path = tmp_path / "output" / "source-snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text())
+    assert snapshot["git_commit"] == result["renderer_git_commit"]
+    assert (
+        snapshot["files_sha256"]["scripts/evaluate_vnext.py"]
+        == result["renderer_script_sha256"]
+    )
+    assert "src/apexveil/video_pipeline.py" in snapshot["files_sha256"]
+    assert result["source_changed_during_evaluation"] is False
+    assert result["source_snapshot_after"] == snapshot
+    changed_snapshot = {
+        "git_commit": snapshot["git_commit"],
+        "files_sha256": dict(snapshot["files_sha256"]),
+    }
+    changed_snapshot["files_sha256"]["src/apexveil/video_pipeline.py"] = "0" * 64
+    assert _source_snapshot_changed(snapshot, changed_snapshot) is True
+    assert _source_snapshot_changed(snapshot, snapshot) is False
     assert len(result["frames"]) == 5
     assert result["frames"][0]["primary_ids"] == [0]
     assert result["frames"][0]["exclude_ids"] == [8]

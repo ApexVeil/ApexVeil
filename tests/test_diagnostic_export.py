@@ -49,8 +49,16 @@ def test_image_export_panels_index_and_input_immutability(tmp_path):
         primary_ids=[0],
         exclude_ids=[7],
         provenance={
+            "category": "manual_corners_preview",
             "kind": "manual_corners_preview",
             "manual_corners_are_ground_truth": False,
+            "status": "needs_review",
+            "flags": ["target_geometry_needs_review", "<script>alert(1)</script>"],
+            "links": {
+                "replace": "IMG_0100/replace.png",
+                "blur": "IMG_0100/blur.png",
+                "report": "IMG_0100/report.json",
+            },
         },
     )
     assert np.array_equal(source, original)
@@ -63,6 +71,13 @@ def test_image_export_panels_index_and_input_immutability(tmp_path):
     index = write_image_index(tmp_path, [report])
     page = index.read_text()
     assert "data-replace" in page and "data-blur" in page
+    assert "Review status: <strong>needs_review</strong>" in page
+    assert "target_geometry_needs_review" in page
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
+    assert 'href="IMG_0100/replace.png" download' in page
+    assert 'href="IMG_0100/blur.png" download' in page
+    assert 'href="IMG_0100/report.json"' in page
+    assert 'href="javascript:' not in page
 
 
 def _solid(color, n=5):
