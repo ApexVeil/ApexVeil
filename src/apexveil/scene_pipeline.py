@@ -73,6 +73,7 @@ def solve_scene(
     *,
     geometry_guidance=None,
     appearance_guidance=None,
+    appearance_parameter_filter=None,
     foreground_mask=None,
     anchors=None,
     noise_seed=0,
@@ -111,6 +112,7 @@ def solve_scene(
         "native_visibility_changed": False,
         "geometry_guidance": _json_value(geometry_guidance),
         "appearance_guidance": _json_value(appearance_guidance),
+        "appearance_parameter_filter_supplied": appearance_parameter_filter is not None,
         "foreground_evidence": {
             "supplied": foreground_mask is not None,
             "ground_truth": False,
@@ -181,6 +183,7 @@ def solve_scene(
             chosen.quad,
             template,
             scene_guidance=appearance_guidance,
+            appearance_parameter_filter=appearance_parameter_filter,
             foreground_mask=foreground_mask,
             protected_mask=inferred_protection,
             noise_seed=noise_seed,

@@ -126,3 +126,25 @@ def test_explicitly_missing_trajectory_candidate_cannot_restart_selection(monkey
     assert report["unresolved_reason"] == "trajectory_geometry_unresolved"
     assert not candidates
     np.testing.assert_array_equal(output, rgb)
+
+
+def test_scene_pipeline_forwards_temporal_appearance_filter():
+    rgb, mask, template, quad = scene()
+    calls = []
+
+    def parameter_filter(gain, black, tint, levels):
+        calls.append(levels.copy())
+        return gain * 0.5, black, tint, {"test_temporal_filter": True}
+
+    _, report, _ = pipeline.solve_scene(
+        rgb,
+        mask,
+        template,
+        selected_candidate=quad,
+        appearance_parameter_filter=parameter_filter,
+    )
+    assert len(calls) == 1
+    assert report["appearance_parameter_filter_supplied"]
+    assert report["compositor"]["appearance"]["temporal_parameters"][
+        "test_temporal_filter"
+    ]
