@@ -35,7 +35,7 @@ from apexveil.imaging.compositor import (
 )
 from apexveil.imaging.offline_geometry import SurfaceGeometry
 from apexveil.imaging.photometry import TemporalPhotometry
-from apexveil.imaging.temporal import rectified_visible_reference
+from apexveil.imaging.temporal import rectified_visible_reference, valid_quad
 from apexveil.montage_pipeline import validate_manifest
 from apexveil.video_pipeline import (
     file_sha256,
@@ -48,13 +48,6 @@ from apexveil.video_pipeline import (
 HEADER_HEIGHT = 48
 MAX_WORKERS = 4
 PASSTHROUGH_KINDS = {"no_plate", "black", "transition"}
-BLOCKING_GEOMETRY_FLAGS = {
-    "degenerate_projected_surface",
-    "ill_conditioned_projected_surface",
-    "insufficient_boundary_support",
-    "insufficient_full_plane_evidence",
-    "invalid_consensus_keep_observation",
-}
 
 
 def _write_json(path: Path, value: dict) -> None:
@@ -219,19 +212,14 @@ def _estimate_identity(
 def _is_replaceable(estimate: SurfaceGeometry | None) -> tuple[bool, list[str]]:
     if estimate is None or estimate.quad is None:
         return False, ["quadrilateral_missing"]
-    review_flags = geometry_review_flags(estimate)
-    reasons = sorted(BLOCKING_GEOMETRY_FLAGS.intersection(review_flags))
-    if estimate.confidence < 0.30:
-        reasons.append("geometry_confidence_below_0.30")
-    quad = np.asarray(estimate.quad)
-    if quad.shape != (4, 2) or not np.isfinite(quad).all():
-        reasons.append("quadrilateral_invalid")
-    return not reasons, reasons
+    if not valid_quad(np.asarray(estimate.quad, dtype=np.float32)):
+        return False, ["quadrilateral_invalid"]
+    return True, []
 
 
-def _frame_seed(base_seed: int, global_index: int, identity: int) -> int:
-    # Stable per-frame/per-identity seeds make noise vary in time and repeat on rerun.
-    return int((base_seed + global_index * 1_000_003 + identity * 97_409) % (2**32))
+def _frame_seed(global_index: int, identity: int) -> int:
+    # Match the shared video renderer's stable per-frame/per-ID seed.
+    return int((global_index * 1_000_003 + (identity + 1) * 9_176) % (2**32))
 
 
 def _blend_supported(
@@ -351,7 +339,6 @@ def _process_shot(
     template,
     estimators: Estimators,
     workers: int,
-    seed: int,
     fps: int,
     source_start: float,
     frame_callback,
@@ -512,7 +499,7 @@ def _process_shot(
                                 template,
                                 estimators,
                                 photometry[identity],
-                                _frame_seed(seed, global_index, identity),
+                                _frame_seed(global_index, identity),
                             )
                             if generated is None:
                                 raise ValueError(comp_meta["reason"])
@@ -711,7 +698,6 @@ def render_vnext(
     shot_ids=None,
     workers=4,
     estimators=None,
-    seed=0,
 ):
     """Render selected shots or the full reviewed timeline from cached masks."""
     root, output = Path(root), Path(output)
@@ -787,7 +773,7 @@ def render_vnext(
         "privacy_certified": False,
         "product_quality_acceptance": "not_run",
         "full_plane_completeness": "unverified_semantic_hypothesis",
-        "noise_seed_policy": "base + global_frame_index*1000003 + object_id*97409 modulo 2^32",
+        "noise_seed_policy": "global_frame_index*1000003 + (object_id+1)*9176 modulo 2^32",
         "source_audio": str(root / "source-audio.mka") if full_run else None,
         "source_audio_verification": None,
         "encoded_verification": {},
@@ -826,7 +812,6 @@ def render_vnext(
                 template,
                 estimators,
                 int(workers),
-                int(seed),
                 fps,
                 float(manifest["source_interval_seconds"][0]),
                 consume_frame,
@@ -893,7 +878,6 @@ def main():
         "--shots", help="comma-separated manifest IDs for a silent subset preview"
     )
     parser.add_argument("--workers", type=int, default=4)
-    parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
     selected = (
         None
@@ -906,7 +890,6 @@ def main():
         template_path=args.template,
         shot_ids=selected,
         workers=args.workers,
-        seed=args.seed,
     )
     print(
         json.dumps(

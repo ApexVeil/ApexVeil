@@ -11,7 +11,7 @@ from apexveil.estimation import (
     Estimators,
 )
 from apexveil.imaging.geometry import SurfaceGeometry
-from scripts.evaluate_vnext import render_vnext
+from scripts.evaluate_vnext import _frame_seed, _is_replaceable, render_vnext
 
 
 class FixedGeometry:
@@ -142,7 +142,6 @@ def test_five_frame_subset_exports_replace_and_blur_with_raw_masks(tmp_path):
         shot_ids=["shot_000"],
         workers=2,
         estimators=estimators,
-        seed=17,
     )
     assert result["status"] == "subset_preview"
     assert result["complete_timeline"] is False
@@ -326,3 +325,23 @@ def test_rejected_quad_keeps_replace_rgb_while_blur_variant_redacts(tmp_path):
     blur_right = decoded["blur"][48:, 192:288].astype(np.int16)
     assert np.mean(np.abs(left[26:44, 28:69] - replace_right[26:44, 28:69])) < 4
     assert np.mean(np.abs(left[26:44, 28:69] - blur_right[26:44, 28:69])) > 4
+
+
+def test_core_valid_quad_is_not_blocked_by_uncalibrated_flags_or_confidence():
+    mask = np.zeros((24, 32), np.uint8)
+    quad = np.array([[2, 2], [20, 2], [20, 14], [2, 14]], np.float32)
+    estimate = SurfaceGeometry(
+        quad,
+        mask,
+        0.01,
+        ["partially_out_of_frame", "insufficient_boundary_support"],
+        {},
+    )
+    accepted, reasons = _is_replaceable(estimate)
+    assert accepted is True
+    assert reasons == []
+
+
+def test_vnext_noise_seed_matches_shared_video_formula():
+    assert _frame_seed(100, 0) == 100 * 1_000_003 + 9_176
+    assert _frame_seed(100, 4) == 100 * 1_000_003 + 5 * 9_176
