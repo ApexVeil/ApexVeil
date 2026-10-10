@@ -208,6 +208,12 @@ def replace_surface(
         255,
     ).astype(np.uint8)
     support = boundary.support & ~protection
+    coverage = getattr(boundary, "coverage", None)
+    if coverage is not None:
+        if coverage.shape != support.shape or not np.isfinite(coverage).all():
+            raise ValueError("Boundary coverage must be finite and match local support")
+        weight = np.clip(coverage, 0, 1)[:, :, None]
+        result = srgb(linear(original) + (linear(result) - linear(original)) * weight)
     result[~support] = original[~support]
     if edit_support_out is not None:
         edit_support_out.update(

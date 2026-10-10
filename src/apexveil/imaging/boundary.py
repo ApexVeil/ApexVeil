@@ -18,6 +18,7 @@ class BoundaryEstimate:
     visible: np.ndarray
     protected: np.ndarray
     diagnostics: dict
+    coverage: np.ndarray | None = None
 
 
 def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigma=0.35):
@@ -78,6 +79,21 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
         _, labels = cv2.connectedComponents(expanded.astype(np.uint8))
         expansion &= np.isin(labels, np.unique(labels[raw]))
     visible = (raw | expansion) & ~protected
+    # Regularize correction strength only at the exterior plane boundary.
+    # This does not fill holes or blur an occluder: their visibility/protection
+    # still gates rendering exactly. A narrow inward ramp prevents isolated
+    # color-supported additions from becoming full-strength repair dots.
+    distance = cv2.distanceTransform(visible.astype(np.uint8), cv2.DIST_L2, 3)
+    width = max(1.5, min(3.0, blur_sigma * 2.0))
+    t = np.clip(distance / width, 0, 1)
+    ramp = t * t * (3 - 2 * t)
+    exterior_band = (inside <= band + 1) & visible
+    near_protection = (
+        cv2.dilate(protected.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
+    )
+    coverage = np.ones(visible.shape, np.float32)
+    coverage[exterior_band & ~near_protection] = ramp[exterior_band & ~near_protection]
+    coverage[~visible] = 0
     return BoundaryEstimate(
         [x0, y0, x1, y1],
         visible.copy(),
@@ -97,5 +113,9 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
             "needs_review": bool(protected.any() and protected_mask is None)
             or bool(expansion.sum() > raw.sum() * 0.2),
             "physically_calibrated": False,
+            "soft_boundary_method": "outer_band_inward_correction_coverage",
+            "soft_boundary_width_px": width,
+            "soft_boundary_pixels": int(((coverage > 0) & (coverage < 1)).sum()),
         },
+        coverage,
     )

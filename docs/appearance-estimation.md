@@ -22,7 +22,12 @@ responses, so exposure remains uncertain even when source segmentation is good.
 `BoundaryEstimate` keeps local edit support, visibility and protected foreground
 separate. A scale-bounded band may add pixels only when observed surface colors
 fit them better than competing surrounding colors. Missing interior pixels remain
-protected. The estimator does not infer a foreground-free full plane by filling
+protected. Continuous correction coverage uses an inward distance ramp only in
+the narrow exterior-plane band, with its width derived from capture blur. This
+attenuates isolated repair dots and mask staircase artifacts without spreading
+edits outside declared support. Interior occlusion boundaries retain their own
+visibility and protection. Low-confidence exterior mixtures can retain some old
+color rather than receiving a full-strength background reconstruction. The estimator does not infer a foreground-free full plane by filling
 holes. An explicit protected mask takes precedence over all additions.
 
 Rounded transparent artwork and blurred optical edges cannot expose the old
@@ -31,8 +36,8 @@ inpainting the inferred plane plus observed support, excluding protected pixels;
 it uses this approximation only at editable corners and optical transitions.
 The reconstruction interior is hidden by the opaque asset. This operation cannot
 recover an unseen bumper, resolve a mistaken quadrilateral or reliably distinguish
-surface screws from foreground. Ambiguous inferred holes or substantial expansion
-are marked `needs_review` in boundary diagnostics.
+surface screws from foreground. Ambiguous inferred holes, substantial expansion or a large reconstructed
+background fraction are marked `needs_review` in boundary diagnostics.
 
 The actual declared edit support and protection are available through the
 `edit_support_out` dictionary (`bbox_xyxy`, local `support`, local `protected`).
