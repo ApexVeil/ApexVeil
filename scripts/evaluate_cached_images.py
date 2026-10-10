@@ -114,6 +114,8 @@ def evaluate(source, reports, template_path, output, selections=None):
         if diagnostic:
             for key, value in diagnostic["diagnostics"].items():
                 diagnostic["diagnostics"][key] = f"{stem}/{value}"
+            for key, value in diagnostic.get("provenance", {}).get("links", {}).items():
+                diagnostic["provenance"]["links"][key] = f"{stem}/{value}"
             diagnostic_reports.append(diagnostic)
     if diagnostic_reports:
         write_image_index(

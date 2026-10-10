@@ -35,7 +35,9 @@ optional bundle through their Python APIs.
 Outputs are `SurfaceGeometry`, `BoundaryEstimate`, `DegradationEstimate` and
 `AppearanceEstimate`. Their arrays carry spatial information; their diagnostics
 remain JSON serializable. Provider identity and whether it is learned are recorded
-for reproducibility. `AppearanceEstimate` contains gain, a spatial RGB floor,
+for reproducibility. An omitted (`None`) blur override uses the degradation
+provider exactly; an explicit numeric override, including zero, takes precedence.
+`AppearanceEstimate` contains gain, a spatial RGB floor,
 tint and an illumination field. It does not provide replacement artwork pixels.
 
 A future learned provider can predict the same quantities without replacing the

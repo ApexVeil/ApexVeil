@@ -105,3 +105,47 @@ def test_invalid_provider_fails_before_processing():
         replace(get_default_estimators(), geometry=object())
     with pytest.raises(ValueError, match="provider_id"):
         replace(get_default_estimators(), provider_id="")
+
+
+def test_injected_zero_blur_is_consistent_in_image_video_and_diagnostic():
+    from apexveil.imaging.geometry import SurfaceGeometry
+    from apexveil.imaging.photometry import TemporalPhotometry
+    from apexveil.video_pipeline import render_surface_pair
+    from scripts.evaluate_vnext import _render_replacement
+
+    image, mask, template = scene()
+    quad = np.array([[40, 35], [190, 35], [190, 75], [40, 75]], np.float32)
+    default = get_default_estimators()
+
+    class ZeroBlur:
+        def estimate(self, rgb, visible, q):
+            return replace(default.degradation.estimate(rgb, visible, q), sigma_px=0.0)
+
+    providers = replace(
+        default, degradation=ZeroBlur(), provider_id="zero-blur-contract"
+    )
+    observation = SurfaceGeometry(quad, mask, 1.0, [], {})
+    _, image_report = render(
+        image,
+        [Detection(0, 0.9, mask, {})],
+        [{"object_id": 0, "quad": quad.tolist(), "flags": []}],
+        "replace",
+        template,
+        estimators=providers,
+    )
+    video_result = render_surface_pair(
+        image,
+        mask,
+        observation,
+        observation,
+        template,
+        providers,
+        TemporalPhotometry(30),
+        9176,
+    )
+    _, diagnostic_report, _ = _render_replacement(
+        image, mask, quad, template, providers, TemporalPhotometry(30), 9176
+    )
+    assert image_report["edits"][0]["blur_sigma_px"] == 0
+    assert video_result[3]["blur_sigma_px"] == 0
+    assert diagnostic_report["blur_sigma_px"] == 0

@@ -15,7 +15,6 @@ from .imaging.compositor import (
     redact_surface,
     replace_surface,
 )
-from .imaging.focus import estimate_edge_softness
 from .imaging.geometry import (
     assess_geometry,
     order_quad,
@@ -87,8 +86,6 @@ def prepare_surfaces(
                 )
                 if quad is not None:
                     surface["quad"] = quad.tolist()
-            if quad is not None:
-                surface["focus"] = estimate_edge_softness(rgb, quad)
             pixels = rgb[mask > 0].astype(np.float32) / 255
             if len(pixels) and np.percentile(pixels.mean(axis=1), 97) < 0.04:
                 surface["flags"].append("very_dark_surface")
@@ -184,11 +181,7 @@ def render(
                     }
                 )
                 continue
-            softness = (
-                blur_sigma
-                if blur_sigma is not None
-                else surface.get("focus", {}).get("sigma_px", 0.35)
-            )
+            softness = blur_sigma
             local_support = {}
             before = output
             output, detail = replace_surface(
@@ -214,9 +207,9 @@ def render(
             if detail.get("boundary", {}).get("needs_review"):
                 flags.append(f"target_{item.object_id}_boundary_needs_review")
             detail["softness_source"] = (
-                "manual" if blur_sigma is not None else "edge_estimate"
+                "manual" if blur_sigma is not None else "degradation_estimator"
             )
-            if blur_sigma is None and softness > 4:
+            if blur_sigma is None and detail["blur_sigma_px"] > 4:
                 flags.append(f"target_{item.object_id}_defocus_preview_needs_review")
             if uncertain:
                 flags.append(f"target_{item.object_id}_uncertain_preview")
@@ -398,6 +391,11 @@ def process_image(
                 "geometry_ground_truth": False,
                 "status": renders["replace"]["status"],
                 "flags": renders["replace"]["flags"],
+                "links": {
+                    "replace": "replace.png",
+                    "blur": "blur.png",
+                    "report": "report.json",
+                },
                 "estimators": estimators.metadata(),
             },
         )
