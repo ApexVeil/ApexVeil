@@ -239,8 +239,8 @@ def replace_surface(
     boundary_diagnostics["retained_uncertain_outer_band_pixels"] = int(
         retained_outer_band.sum()
     )
-    boundary_diagnostics["boundary_replacement_complete"] = not bool(
-        retained_outer_band.any()
+    boundary_diagnostics["boundary_replacement_complete"] = (
+        False if retained_outer_band.any() else None
     )
     boundary_diagnostics["ridge_policy"] = (
         "source_outer_band_retained"
