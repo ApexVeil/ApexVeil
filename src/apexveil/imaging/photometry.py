@@ -1,6 +1,7 @@
 """Temporal material parameters, separate from current-frame spatial shadows."""
 
 import math
+
 import numpy as np
 
 
@@ -22,6 +23,7 @@ class TemporalPhotometry:
     def reset(self):
         self.log_gain = None
         self.black = None
+        self.black_shape = None
         self.tint = None
         self.scene = None
         self.fast_seconds = 0.0
@@ -38,8 +40,10 @@ class TemporalPhotometry:
         ):
             raise ValueError("Non-finite or negative temporal appearance parameters")
         target = math.log(max(gain, 1e-6))
-        raw_black = np.median(black.reshape(-1, 3), axis=0).tolist()
-        if self.black is not None and self.black.shape != black.shape:
+        raw_level = np.median(black.reshape(-1, 3), axis=0)
+        raw_black = raw_level.tolist()
+        current_residual = black - raw_level
+        if self.black_shape is not None and self.black_shape != black.shape:
             self.reset()
         scene_step = np.zeros(2, np.float32)
         if self.scene is not None:
@@ -53,7 +57,8 @@ class TemporalPhotometry:
         weight = 1 - math.exp(-self.dt / (0.022 if fast else 0.12))
         if self.log_gain is None:
             self.log_gain = target
-            self.black = black.copy()
+            self.black = raw_level.copy()
+            self.black_shape = black.shape
             self.tint = tint.copy()
             applied_step = 0.0
         else:
@@ -62,16 +67,18 @@ class TemporalPhotometry:
             if not fast:
                 applied_step = float(np.clip(applied_step, -2 * self.dt, 2 * self.dt))
             self.log_gain += applied_step
-            self.black += (black - self.black) * weight
+            self.black += (raw_level - self.black) * weight
             self.tint += (tint - self.tint) * weight
         self.scene = scene.copy()
         self.fast_seconds = max(0.0, self.fast_seconds - self.dt)
         return (
             float(math.exp(self.log_gain)),
-            self.black.copy(),
+            np.maximum(current_residual + self.black, 0).astype(np.float32),
             self.tint.copy(),
             {
-                "method": "scene_gated_log_gain_and_material_color",
+                "method": "scene_gated_log_gain_and_global_rgb_veil_level",
+                "filtered_veil_rgb_level_linear": self.black.tolist(),
+                "spatial_veil_residual_filtered": False,
                 "raw_exposure_gain_linear": gain,
                 "raw_black_rgb_p50_linear": raw_black,
                 "observed_scene_log_change": scene_step.tolist(),

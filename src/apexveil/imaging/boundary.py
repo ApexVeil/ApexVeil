@@ -28,16 +28,18 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
     ys, xs = np.where(visible_mask > 0)
     if not len(xs):
         raise ValueError("Visible mask is empty")
-    x0, y0 = max(0, int(xs.min()) - band - 3), max(0, int(ys.min()) - band - 3)
+    x0, y0 = (
+        max(0, int(min(xs.min(), q[:, 0].min())) - band - 3),
+        max(0, int(min(ys.min(), q[:, 1].min())) - band - 3),
+    )
     x1, y1 = (
-        min(rgb.shape[1], int(xs.max()) + band + 4),
-        min(rgb.shape[0], int(ys.max()) + band + 4),
+        min(rgb.shape[1], int(max(xs.max(), q[:, 0].max())) + band + 4),
+        min(rgb.shape[0], int(max(ys.max(), q[:, 1].max())) + band + 4),
     )
     raw = visible_mask[y0:y1, x0:x1] > 0
     plane = np.zeros(raw.shape, np.uint8)
     cv2.fillConvexPoly(plane, np.rint(q - [x0, y0]).astype(np.int32), 1)
     inside = cv2.distanceTransform(plane, cv2.DIST_L2, 3)
-    absent = (plane > 0) & ~raw
     # Native absent holes are protected even beside the geometric boundary.
     # Their color cannot prove they belong to the replaceable material.
     _, missing_labels = cv2.connectedComponents((~raw).astype(np.uint8))
@@ -53,14 +55,6 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
     )
     enclosed = ~raw & ~np.isin(missing_labels, exterior_labels)
     protected = enclosed.copy()
-    count, labels, _stats, _ = cv2.connectedComponentsWithStats(absent.astype(np.uint8))
-    # Protect absent interior evidence. A component may also contain a missed
-    # outer strip, so do not label the entire connected component foreground.
-    # Boundary-band additions still require competing color evidence.
-    for i in range(1, count):
-        region = labels == i
-        if np.any(inside[region] > band + 1):
-            protected |= region & (inside > band)
     if protected_mask is not None:
         if protected_mask.shape != visible_mask.shape:
             raise ValueError("protected_mask must have the source mask shape")
@@ -93,24 +87,10 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
         _, labels = cv2.connectedComponents(expanded.astype(np.uint8))
         expansion &= np.isin(labels, np.unique(labels[raw]))
     visible = (raw | expansion) & ~protected
-    # Regularize correction strength only at the exterior plane boundary.
-    # This does not fill holes or blur an occluder: their visibility/protection
-    # still gates rendering exactly. A narrow inward ramp prevents isolated
-    # color-supported additions from becoming full-strength repair dots.
-    distance = cv2.distanceTransform(visible.astype(np.uint8), cv2.DIST_L2, 3)
-    width = max(1.5, min(3.0, blur_sigma * 2.0))
-    t = np.clip(distance / width, 0, 1)
-    ramp = t * t * (3 - 2 * t)
-    exterior_band = (inside <= band + 1) & visible
-    near_protection = (
-        cv2.dilate(protected.astype(np.uint8), np.ones((3, 3), np.uint8)) > 0
-    )
-    coverage = np.ones(visible.shape, np.float32)
-    coverage[exterior_band & ~near_protection] = ramp[exterior_band & ~near_protection]
-    coverage[~visible] = 0
+    removal = visible & ~protected
     return BoundaryEstimate(
         [x0, y0, x1, y1],
-        visible.copy(),
+        removal,
         visible,
         protected,
         {
@@ -120,17 +100,42 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
             "expanded_pixels": int(expansion.sum()),
             "protected_pixels": int(protected.sum()),
             "enclosed_missing_pixels": int(enclosed.sum()),
-            "edit_support_pixels": int(visible.sum()),
-            "background_recovery": "bounded_local_inpaint_approximation",
+            "edit_support_pixels": int(removal.sum()),
+            "old_surface_removal_pixels": int(removal.sum()),
+            "background_recovery": "independent_old_material_removal_background",
             "protection_confidence": "explicit"
             if protected_mask is not None
             else "conservative_hole_inference",
             "needs_review": bool(protected.any() and protected_mask is None)
             or bool(expansion.sum() > raw.sum() * 0.2),
             "physically_calibrated": False,
-            "soft_boundary_method": "outer_band_inward_correction_coverage",
-            "soft_boundary_width_px": width,
-            "soft_boundary_pixels": int(((coverage > 0) & (coverage < 1)).sum()),
+            "soft_boundary_method": "native_template_alpha_without_inward_crop",
+            "soft_boundary_width_px": 0.0,
+            "soft_boundary_pixels": 0,
         },
-        coverage,
+        None,
+    )
+
+
+def extend_boundary_bounds(boundary, bbox):
+    # Explicit old-material support can exceed the new template footprint.
+    a, b, c, d = boundary.bbox_xyxy
+    x0, y0, x1, y1 = min(a, bbox[0]), min(b, bbox[1]), max(c, bbox[2]), max(d, bbox[3])
+    if [x0, y0, x1, y1] == boundary.bbox_xyxy:
+        return boundary
+
+    def extend(value):
+        if value is None:
+            return None
+        result = np.zeros((y1 - y0, x1 - x0), value.dtype)
+        result[b - y0 : d - y0, a - x0 : c - x0] = value
+        return result
+
+    return BoundaryEstimate(
+        [x0, y0, x1, y1],
+        extend(boundary.support),
+        extend(boundary.visible),
+        extend(boundary.protected),
+        dict(boundary.diagnostics),
+        extend(boundary.coverage),
     )

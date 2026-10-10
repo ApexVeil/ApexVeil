@@ -26,7 +26,7 @@ def test_stable_donors_reconstruct_known_background_at_transparent_corner():
     np.testing.assert_array_equal(result.rgb[~requested], rgb[~requested])
 
 
-def test_narrow_dark_frame_on_bright_body_abstains_from_whole_surface_repair():
+def test_layered_background_uses_nearest_exterior_without_retaining_old_surface():
     rgb, plane, protected, requested = fixture()
     rgb[:] = 220
     # One-pixel real ridge is a donor layer, not contamination to erase.
@@ -37,10 +37,10 @@ def test_narrow_dark_frame_on_bright_body_abstains_from_whole_surface_repair():
         rgb, plane, plane > 0, protected, requested, blur_sigma=0.5, radius=3
     )
     assert not result.diagnostics["reliable"]
-    assert result.diagnostics["applied_pixels"] == 0
-    assert result.diagnostics["suppressed_pixels"] == int(requested.sum())
-    assert not result.applied_mask.any()
-    np.testing.assert_array_equal(result.rgb, rgb)
+    assert result.diagnostics["applied_pixels"] == int(requested.sum())
+    assert result.diagnostics["suppressed_pixels"] == 0
+    assert result.applied_mask[requested].all()
+    np.testing.assert_array_equal(result.rgb[~requested], rgb[~requested])
 
 
 def test_repair_never_replaces_explicit_foreground_or_pixels_outside_request():
@@ -55,7 +55,7 @@ def test_repair_never_replaces_explicit_foreground_or_pixels_outside_request():
     np.testing.assert_array_equal(result.rgb[~requested], rgb[~requested])
 
 
-def test_unstable_donors_do_not_chop_observed_ridge_with_ragged_visibility():
+def test_unstable_donors_do_not_shrink_opaque_material_or_change_foreground():
     from apexveil.imaging.appearance import AppearanceEstimate
     from apexveil.imaging.boundary import BoundaryEstimate
     from apexveil.imaging.compositor import Template, replace_surface
@@ -98,8 +98,12 @@ def test_unstable_donors_do_not_chop_observed_ridge_with_ragged_visibility():
         boundary_estimate=boundary,
     )
     assert not report["boundary"]["background_repair"]["reliable"]
-    assert report["boundary"]["boundary_replacement_complete"] is False
-    np.testing.assert_array_equal(output[30:32, 35:205], rgb[30:32, 35:205])
+    assert report["boundary"]["retained_uncertain_outer_band_pixels"] == 0
+    assert (
+        report["boundary"]["ridge_policy"]
+        == "independent_old_removal_and_native_asset_alpha"
+    )
+    assert output[32, 140, 1] < 30
     np.testing.assert_array_equal(output[50:60, 100:104], rgb[50:60, 100:104])
     np.testing.assert_array_equal(template.alpha, alpha)
     assert output[65, 140, 1] < 50

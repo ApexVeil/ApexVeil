@@ -1,8 +1,8 @@
-"""Abstaining local background reconstruction for material optical edges.
+"""Local background reconstruction for material optical edges.
 
-A donor gap can remove a real frame or ridge. Agreement between adjacent and
-more distant reconstructions is necessary before using either behind the asset.
-The decision is per surface, never a fragmented per-pixel repair-confidence mask.
+A donor gap can remove a real frame or ridge. Adjacent and more distant reconstructions expose uncertainty about the unseen
+background. Disagreement selects the nearest exterior approximation; it never
+shrinks material coverage or retains the old plate as a quality workaround.
 """
 
 from dataclasses import dataclass
@@ -28,7 +28,7 @@ def estimate_background_repair(
             rgb.copy(),
             np.zeros_like(requested),
             {
-                "method": "whole_surface_donor_agreement",
+                "method": "old_surface_removal_nearest_exterior_background",
                 "requested_pixels": 0,
                 "applied_pixels": 0,
                 "suppressed_pixels": 0,
@@ -39,8 +39,10 @@ def estimate_background_repair(
     base = ((plane > 0) | visible).astype(np.uint8)
     gap = max(1, min(10, round(blur_sigma * 2 + 1)))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (gap * 2 + 1,) * 2)
-    near_mask = (base > 0) & ~protected
-    far_mask = (cv2.dilate(base, kernel) > 0) & ~protected
+    # Foreground is not a background donor. Reconstruct beneath it for the
+    # background layer only; output protection still preserves its RGB exactly.
+    near_mask = (base > 0) | protected
+    far_mask = (cv2.dilate(base, kernel) > 0) | protected
     near, far = [
         cv2.inpaint(rgb, m.astype(np.uint8) * 255, radius, cv2.INPAINT_TELEA)
         for m in (near_mask, far_mask)
@@ -64,21 +66,20 @@ def estimate_background_repair(
     q75 = float(np.percentile(disagreement[requested], 75))
     reliable = bool(donors.sum() >= 12 and q75 <= tolerance)
     background = rgb.copy()
-    applied = requested.copy() if reliable else np.zeros_like(requested)
-    if reliable:
-        background[applied] = far[applied]
+    applied = requested.copy()
+    background[applied] = (far if reliable else near)[applied]
     return BackgroundRepairEstimate(
         background,
         applied,
         {
-            "method": "whole_surface_donor_agreement",
+            "method": "old_surface_removal_nearest_exterior_background",
             "requested_pixels": count,
             "applied_pixels": int(applied.sum()),
             "suppressed_pixels": count - int(applied.sum()),
             "reliable": reliable,
             "reason": "near_and_gap_donors_agree"
             if reliable
-            else "layered_or_unstable_background_donors",
+            else "uncertain_background_use_nearest_exterior_without_shrinking_asset",
             "donor_gap_px": gap,
             "donor_samples": int(donors.sum()),
             "donor_disagreement_p75_lab_code": q75,

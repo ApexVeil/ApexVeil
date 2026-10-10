@@ -1,7 +1,8 @@
 import numpy as np
-from apexveil.imaging.photometry import TemporalPhotometry
+
 from apexveil.imaging.appearance import adapt_asset
-from apexveil.imaging.color import srgb, linear
+from apexveil.imaging.color import linear, srgb
+from apexveil.imaging.photometry import TemporalPhotometry
 
 
 def parameters(gain=1.0, black=0.002):
@@ -57,3 +58,27 @@ def test_reset_does_not_carry_old_exposure_or_color_into_a_new_shot():
     gain, black, _, _ = state.filter(*parameters(0.05, 0), [0.002, 0.004])
     assert abs(gain - 0.05) < 1e-6
     assert black.max() == 0
+
+
+def test_moving_spatial_rgb_veil_has_no_history_peak_with_stable_global_level():
+    state = TemporalPhotometry(30)
+    left = np.full((60, 180, 3), 0.002, np.float32)
+    right = left.copy()
+    left[:, 20:50, 0] += 0.06
+    right[:, 120:150, 0] += 0.06
+    state.filter(1, left, np.ones(3), [0.1, 0.2])
+    _, current, _, meta = state.filter(1, right, np.ones(3), [0.1, 0.2])
+    assert current[:, 20:50, 0].max() < 0.003
+    assert current[:, 120:150, 0].min() > 0.06
+    assert meta["spatial_veil_residual_filtered"] is False
+
+
+def test_uniform_veil_retains_previous_scalar_ema_and_real_light_fast_response():
+    state = TemporalPhotometry(30)
+    state.filter(*parameters(1, 0.002), [0.1, 0.2])
+    _, black, _, meta = state.filter(*parameters(1, 0.02), [0.1, 0.2])
+    expected = 0.002 + (0.02 - 0.002) * meta["parameter_weight_current"]
+    np.testing.assert_allclose(black, expected, atol=1e-7)
+    _, black, _, meta = state.filter(*parameters(1, 0.08), [0.4, 0.8])
+    assert meta["fast_light_response"]
+    assert black.mean() > 0.06

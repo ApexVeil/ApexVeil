@@ -1,81 +1,57 @@
-# Deterministic appearance and boundary estimation
+# Scene-layer compositing and bounded lighting guidance
 
-ApexVeil estimates material appearance and capture degradation from the source,
-then renders the approved asset deterministically. This is a photograph-derived
-approximation, not recovered physical lighting or calibrated camera response.
-No model, generated artwork, training or per-image color thresholds are used.
+The renderer distinguishes observed plate visibility, declared old-material
+removal support, approved template alpha, and protected foreground. These are
+not interchangeable masks. Native template alpha is projected and blurred by
+the capture PSF; background uncertainty never erodes it or deliberately retains
+an inward ring of old material. Outside declared edit support and on protected
+foreground, source pixels remain exact.
 
-`AppearanceEstimate` contains exposure gain, a canonical linear RGB additive
-floor, illumination tint and a spatial field. `estimate_appearance` returns that
-object; `render_appearance(asset, estimate)` applies it. The existing temporal
-parameter callback still filters gain, floor and tint without averaging spatial
-shadows. A future estimator can supply those parameters while keeping the same
-approved logo and renderer.
+Without semantic foreground or an explicit removal mask, the default removal
+support remains observed/color-supported visibility. A quadrilateral alone does
+not authorize painting a large unobserved region. `old_surface_mask` can declare
+a full removal domain. `foreground_mask` supplies independently parsed semantic
+foreground and can resolve conservative native-hole inference; legacy
+`protected_mask` always remains an additional strict protection. A person mask
+from SAM3.1 is model evidence, not ground truth, and must be reviewed against the
+RGB and native plate mask. No foreground inference based on a distance cutoff
+certifies a person silhouette.
 
-Ink removal precedes a robust diffuse exposure percentile, so isolated glints
-do not determine logo brightness. The smooth floor uses dark ink when the source
-has enough visibility and spatial resolution. Unresolved ink falls back to a
-bounded neutral/context floor. Masked foreground does not enter the spatial fit.
-Reflective license plates and a matte replacement have different material
-responses, so exposure remains uncertain even when source segmentation is good.
+Old material beneath rounded corners/optical transitions is removed using a
+local background estimate. Adjacent and gap-separated donor reconstructions
+provide an uncertainty diagnostic. If they disagree, the nearest exterior
+approximation is used, without shrinking material coverage. This cannot recover
+unseen vehicle texture with certainty. Previous donor abstention plus inward
+coverage produced green rings and smaller replacement footprints; that default
+has been removed rather than described as a quality success.
 
-`BoundaryEstimate` keeps local edit support, visibility and protected foreground
-separate. A scale-bounded band may add pixels only when observed surface colors
-fit them better than competing surrounding colors. Every enclosed missing component of observed visibility is protected,
-including holes beside the geometric edge. Outside-connected missing components
-retain conservative interior protection; only their exterior strips may receive
-color-supported additions. Continuous correction coverage uses an inward distance ramp only in
-the narrow exterior-plane band, with its width derived from capture blur. This
-attenuates isolated repair dots and mask staircase artifacts without spreading
-edits outside declared support. Interior occlusion boundaries retain their own
-visibility and protection. Low-confidence exterior mixtures can retain some old
-color rather than receiving a full-strength background reconstruction. The estimator does not infer a foreground-free full plane by filling
-holes. An explicit protected mask takes precedence over all additions.
+`AppearanceEstimate` still contains gain, canonical RGB additive field (`black`
+for API compatibility), diffuse tint and multiplicative spatial shading.
+Resolved ink supports a spatial RGB veil estimate. A single context dark tint
+must not overwrite that field: the old green albedo is not illumination, and
+warm camera flare must remain spatially colored. Sparse/unresolved ink retains
+an explicitly uncertain context fallback. This is not calibrated inverse optics.
 
-Rounded transparent artwork and blurred optical edges can expose the old
-surface beneath them. Local background reconstruction is allowed only when two
-donor choices agree: the immediate exterior of inferred plane/visible
-support, and the exterior after a bounded optical donor gap. Their encoded Lab
-disagreement is compared with source-derived exterior residual noise/texture and
-a small quantization tolerance. A whole-surface decision avoids patchwork repair.
-When they disagree, reconstruction is disabled for that surface and ordinary
-source/asset alpha compositing is retained. In the same uncertain outer band,
-a continuous geometric inward confidence ramp retains the observed ridge instead
-of chopping it with a jagged support-distance boundary. This is explicitly
-incomplete boundary replacement: the source frame and some old colored edge can
-remain. The approved template alpha and artwork are not edited. The renderer reports requested,
-applied and suppressed repair pixels and its donor-agreement evidence.
+`replace_surface(..., scene_guidance=...)` accepts `SceneAppearanceGuidance` or
+JSON containing optional `exposure_gain_linear`, `additive_rgb_linear`,
+`flare_control_points`, `shading_control_points`, `diffuse_tint_rgb`, and
+`provenance`. Control points contain normalized canonical `xy` plus
+`rgb_linear` (flare) or `value` (shading). At most sixteen finite points are
+accepted. Fields are interpolated continuously; diffuse shading and additive
+veil are independent. Guidance never supplies replacement/logo pixels.
+The deterministic renderer always uses the approved asset. Reference guidance
+and reference geometry must be labelled separately from automatic estimation.
 
-The donor-gap reconstruction can erase a real narrow frame/ridge and substitute
-a different layer such as bright car paint. This previously caused pale erosion
-dots at a jagged support boundary; soft coverage alone could not fix the wrong
-background estimate. Abstaining from ambiguous reconstruction prevents this
-specific failure but can retain a pre-existing colored rim. Stable-background
-agreement is necessary, not proof of recovering the unseen bumper. Ambiguous
-holes, unstable donors, substantial expansion or a large reconstructed fraction
-are marked `needs_review`. No threshold depends on photo identity or surface hue.
+Blur `None` delegates exactly to the injected degradation estimate. A numeric
+blur, including zero, is an explicit override. Capture noise remains
+source-derived and seeded; video seeds should vary deterministically by frame.
+Temporal smoothing of flare should operate on coefficients/levels while keeping
+current-frame spatial shape rather than attaching a stale canonical glare field
+to a moving plate.
 
-The actual declared edit support and protection are available through the
-`edit_support_out` dictionary (`bbox_xyxy`, local `support`, local `protected`).
-Metadata remains JSON-compatible. The correct invariants are exact equality
-outside declared edit support and exact equality on protected foreground. The raw
-segmentation boundary is an observation and is not the edit-support invariant.
-
-`replace_surface(..., blur_sigma=None)` delegates blur entirely to the selected
-degradation estimate. An explicit number, including zero, is a user override
-and is applied exactly rather than being raised to a legacy focus floor.
-
-`DegradationEstimate` measures isotropic edge spread with modest presmoothing and
-flat-patch high-pass MAD noise. Flat-patch variances provide a bounded encoded
-signal-dependent noise approximation, together with sample count and reliability.
-Noise is synthesized from an explicit seed and blended with material alpha. Video
-callers should pass a different deterministic frame seed; reusing the still default
-seed can cause correlated texture. Directional motion kernels, chromatic sensor
-noise and physical flare decomposition are not currently recovered.
-
-CPU synthetic checks cover known blur/noise, rounded corner decontamination,
-foreground branches connected to the exterior, inferred boundary additions,
-parameter injection and declared-support invariants. Private evaluation artifacts
-must remain ignored and report source hash, template hash, fixed geometry source,
-estimated parameters and full-frame/crop comparisons. Assisted quadrilaterals are
-comparisons, never ground truth. Passing these checks is not a photorealism score.
+Current evidence prioritizes full-image and crop comparisons for sunlight,
+complete video masks and occluded reference geometry. Small synthetic checks
+cover independent flare/shading, exact foreground protection, approved alpha and
+explicit removal authority. These checks establish contracts, not natural image
+quality. Automatic flare magnitude, incomplete foreground evidence and unknown
+background behind rounded corners remain visual limitations for the guided loop.

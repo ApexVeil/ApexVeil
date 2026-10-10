@@ -26,11 +26,13 @@ def test_color_supported_boundary_expands_into_missed_surface_and_not_background
     assert estimate.diagnostics["expanded_pixels"] > 0
 
 
-def test_foreground_hole_and_branch_connected_to_exterior_remain_protected():
+def test_declared_foreground_connected_to_exterior_remains_protected():
     rgb, mask, quad = scene()
     rgb[20:70, 90:104] = [175, 90, 60]
     mask[20:70, 90:104] = 0
-    estimate = estimate_boundary(rgb, mask, quad)
+    foreground = np.zeros(mask.shape, np.uint8)
+    foreground[20:70, 90:104] = 1
+    estimate = estimate_boundary(rgb, mask, quad, protected_mask=foreground)
     x0, y0, _x1, _y1 = estimate.bbox_xyxy
     assert estimate.protected[50 - y0, 95 - x0]
     assert not estimate.support[30 - y0, 95 - x0]
@@ -62,6 +64,7 @@ def test_declared_support_and_protected_foreground_are_exact_invariants():
         template,
         0,
         protected_mask=protected,
+        foreground_mask=protected,
         appearance_estimate=appearance,
         degradation_estimate=degradation,
         edit_support_out=support,
@@ -73,65 +76,6 @@ def test_declared_support_and_protected_foreground_are_exact_invariants():
     assert np.array_equal(output[protected > 0], rgb[protected > 0])
     assert output[33, 33, 1] < 100
     assert report["corner_cleanup_pixels"] > 0
-
-
-def test_soft_outer_correction_does_not_soften_interior_occlusion_visibility():
-    rgb, mask, quad = scene()
-    mask[45:70, 100:110] = 0
-    estimate = estimate_boundary(rgb, mask, quad, blur_sigma=1.8)
-    x0, y0, _, _ = estimate.bbox_xyxy
-    assert 0 < estimate.coverage[31 - y0, 100 - x0] < 1
-    assert estimate.coverage[55 - y0, 99 - x0] == 1
-    assert estimate.coverage[55 - y0, 105 - x0] == 0
-    assert np.all(estimate.coverage[estimate.protected] == 0)
-    assert np.all(estimate.coverage[~estimate.support] == 0)
-
-
-def test_sparse_outer_support_is_attenuated_or_abstained():
-    from dataclasses import replace
-
-    rgb, mask, quad = scene()
-    mask[29, 50] = 1
-    estimate = estimate_boundary(rgb, mask, quad, blur_sigma=1.8)
-    template = Template(
-        np.full((60, 180, 3), 15, np.uint8), np.ones((60, 180), np.float32), {}
-    )
-    appearance = AppearanceEstimate(
-        1,
-        np.zeros((60, 180, 3), np.float32),
-        np.ones(3),
-        np.ones((60, 180), np.float32),
-        {},
-    )
-    degradation = DegradationEstimate(1.8, 0, 0, {})
-    hard, hard_report = replace_surface(
-        rgb,
-        mask,
-        quad,
-        template,
-        1.8,
-        boundary_estimate=replace(estimate, coverage=None),
-        appearance_estimate=appearance,
-        degradation_estimate=degradation,
-    )
-    soft, _ = replace_surface(
-        rgb,
-        mask,
-        quad,
-        template,
-        1.8,
-        boundary_estimate=estimate,
-        appearance_estimate=appearance,
-        degradation_estimate=degradation,
-    )
-    hard_delta = np.abs(hard[29, 50].astype(float) - rgb[29, 50]).mean()
-    soft_delta = np.abs(soft[29, 50].astype(float) - rgb[29, 50]).mean()
-    if hard_report["boundary"]["background_repair"]["reliable"]:
-        assert hard_delta > 0
-        assert soft_delta < hard_delta * 0.8
-    else:
-        assert soft_delta == hard_delta == 0
-    assert soft[60, 140, 1] < 50
 
 
 def test_near_edge_enclosed_hole_cannot_be_expanded_despite_same_surface_color():

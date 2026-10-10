@@ -5,7 +5,7 @@ The inferred plane is not visibility; ambiguous holes remain protected.
 """
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import cv2
@@ -14,8 +14,10 @@ from PIL import Image
 
 from .appearance import estimate_context_tint, render_appearance
 from .background import estimate_background_repair
-from .color import linear, srgb
+from .boundary import extend_boundary_bounds
+from .color import linear, luma, srgb
 from .degradation import apply_capture_noise
+from .scene_appearance import apply_scene_guidance
 
 
 @dataclass
@@ -86,6 +88,9 @@ def replace_surface(
     noise_seed=0,
     edit_support_out=None,
     estimators=None,
+    scene_guidance=None,
+    old_surface_mask=None,
+    foreground_mask=None,
 ):
     """Insert a material, retaining visible-mask holes and rounded artwork."""
     if estimators is None:
@@ -103,6 +108,11 @@ def replace_surface(
     boundary = boundary_estimate or estimators.boundary.estimate(
         rgb, mask, quad, protected_mask=protected_mask, blur_sigma=blur_sigma
     )
+    if old_surface_mask is not None:
+        if old_surface_mask.shape != mask.shape:
+            raise ValueError("old_surface_mask must have source shape")
+        if np.any(old_surface_mask):
+            boundary = extend_boundary_bounds(boundary, local_bounds(old_surface_mask))
     th, tw = template.alpha.shape
     corners = np.array([[0, 0], [tw - 1, 0], [tw - 1, th - 1], [0, th - 1]], np.float32)
     homography = cv2.getPerspectiveTransform(corners, quad.astype(np.float32))
@@ -138,8 +148,31 @@ def replace_surface(
         / max(0.5, blur_sigma)
         >= 60,
         context_black_level=context_detail.get("luminance_linear"),
-        parameter_filter=appearance_parameter_filter,
+        parameter_filter=None,
     )
+    estimated_appearance = apply_scene_guidance(estimated_appearance, scene_guidance)
+    if appearance_parameter_filter is not None:
+        source_levels = np.percentile(luma(linear(rect))[rect_visibility > 0], [50, 80])
+        gain, veil, tint, temporal = appearance_parameter_filter(
+            estimated_appearance.gain,
+            estimated_appearance.black,
+            estimated_appearance.tint,
+            source_levels,
+        )
+        diagnostics = dict(estimated_appearance.diagnostics)
+        diagnostics.update(
+            exposure_gain_linear=gain,
+            temporal_parameters=temporal,
+            black_point_linear=float(np.median(luma(veil))),
+            black_field_rgb_p50_linear=np.median(veil.reshape(-1, 3), axis=0).tolist(),
+        )
+        estimated_appearance = replace(
+            estimated_appearance,
+            gain=gain,
+            black=veil,
+            tint=tint,
+            diagnostics=diagnostics,
+        )
     asset = render_appearance(template.rgb, estimated_appearance)
     appearance = dict(estimated_appearance.diagnostics)
     appearance["context"] = context_detail
@@ -162,11 +195,24 @@ def replace_surface(
         alpha = cv2.GaussianBlur(alpha, (0, 0), blur_sigma)
         pm = cv2.GaussianBlur(pm, (0, 0), blur_sigma)
     protection = boundary.protected.copy()
+    if foreground_mask is not None:
+        if foreground_mask.shape != mask.shape:
+            raise ValueError("foreground_mask must have source shape")
+        protection = foreground_mask[y0:y1, x0:x1] > 0
     if protected_mask is not None:
         if protected_mask.shape != mask.shape:
             raise ValueError("protected_mask must have the source mask shape")
         protection |= protected_mask[y0:y1, x0:x1] > 0
-    visible = boundary.visible & ~protection
+    removal = boundary.support.copy()
+    if foreground_mask is not None and old_surface_mask is None:
+        declared_plane = np.zeros(removal.shape, np.uint8)
+        cv2.fillConvexPoly(declared_plane, np.rint(quad - [x0, y0]).astype(np.int32), 1)
+        removal |= declared_plane > 0
+    if old_surface_mask is not None:
+        if old_surface_mask.shape != mask.shape:
+            raise ValueError("old_surface_mask must have source shape")
+        removal = old_surface_mask[y0:y1, x0:x1] > 0
+    visible = removal & ~protection
     visibility_weight = visible.astype(np.float32)
     alpha *= visibility_weight
     pm *= visibility_weight[:, :, None]
@@ -199,41 +245,26 @@ def replace_surface(
         0,
         255,
     ).astype(np.uint8)
-    support = boundary.support & ~protection
-    coverage = getattr(boundary, "coverage", None)
+    support = visible
     retained_outer_band = np.zeros_like(support)
-    if not repair.diagnostics["reliable"]:
-        # Disagreeing donor layers also make fragmented exterior replacement
-        # unsafe: preserve the observed ridge continuously across that band.
-        # This deliberately leaves incomplete boundary replacement rather than
-        # cutting a real frame into pale/dark points with a binary SAM contour.
-        interior_distance = cv2.distanceTransform(plane, cv2.DIST_L2, 3)
-        uncertain_band = boundary.diagnostics.get("band_px", 3)
-        transition = max(1.5, min(3.0, blur_sigma * 2.0))
-        t = np.clip((interior_distance - uncertain_band) / transition, 0, 1)
-        geometric_coverage = t * t * (3 - 2 * t)
-        coverage = (
-            geometric_coverage
-            if coverage is None
-            else np.minimum(coverage, geometric_coverage)
-        )
-        retained_outer_band = support & (interior_distance <= uncertain_band)
-    if coverage is not None:
-        if coverage.shape != support.shape or not np.isfinite(coverage).all():
-            raise ValueError("Boundary coverage must be finite and match local support")
-        weight = np.clip(coverage, 0, 1)[:, :, None]
-        result = srgb(linear(original) + (linear(result) - linear(original)) * weight)
     result[~support] = original[~support]
     if edit_support_out is not None:
         edit_support_out.update(
             bbox_xyxy=boundary.bbox_xyxy,
             support=support.copy(),
             protected=protection.copy(),
+            old_surface_removal=visible.copy(),
+            template_alpha=alpha.copy(),
         )
     output = rgb.copy()
     output[y0:y1, x0:x1] = result
     boundary_diagnostics = dict(boundary.diagnostics)
     repair_fraction = float(cleanup.sum() / max(1, support.sum()))
+    boundary_diagnostics["foreground_source"] = (
+        "authoritative_foreground_mask"
+        if foreground_mask is not None
+        else "conservative_native_visibility"
+    )
     boundary_diagnostics["background_repair_fraction"] = repair_fraction
     boundary_diagnostics["background_repair"] = repair.diagnostics
     boundary_diagnostics["retained_uncertain_outer_band_pixels"] = int(
@@ -243,9 +274,7 @@ def replace_surface(
         False if retained_outer_band.any() else None
     )
     boundary_diagnostics["ridge_policy"] = (
-        "source_outer_band_retained"
-        if retained_outer_band.any()
-        else "standard_material_coverage"
+        "independent_old_removal_and_native_asset_alpha"
     )
     boundary_diagnostics["needs_review"] = (
         bool(boundary_diagnostics.get("needs_review", False))

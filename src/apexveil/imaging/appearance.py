@@ -203,7 +203,7 @@ def estimate_appearance(
         if context_black_level is not None:
             floor = min(floor, max(0.001, 2 * context_black_level))
         black = np.full_like(src, floor)
-    if context_tint is not None:
+    if context_tint is not None and not color_floor_reliable:
         black = luma(black)[:, :, None] * np.asarray(context_tint, np.float32)
     # Illumination is estimated after removing the additive veil.
     diffuse = np.maximum(broad - luma(black), 1e-6)
@@ -241,8 +241,8 @@ def estimate_appearance(
         else "uncertain_ink_neutral_fallback",
         "reference_visible_fraction": reference_coverage,
         "black_chroma_source": "scene_context"
-        if context_tint is not None
-        else "plate_ink",
+        if context_tint is not None and not color_floor_reliable
+        else "spatial_rgb_ink_veil",
         "ink_resolved": ink_resolved,
         "color_floor_reliable": color_floor_reliable,
         "tint_rgb": tint.tolist(),
