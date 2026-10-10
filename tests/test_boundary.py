@@ -87,7 +87,7 @@ def test_soft_outer_correction_does_not_soften_interior_occlusion_visibility():
     assert np.all(estimate.coverage[~estimate.support] == 0)
 
 
-def test_sparse_outer_support_does_not_receive_full_strength_correction():
+def test_sparse_outer_support_is_attenuated_or_abstained():
     from dataclasses import replace
 
     rgb, mask, quad = scene()
@@ -104,7 +104,7 @@ def test_sparse_outer_support_does_not_receive_full_strength_correction():
         {},
     )
     degradation = DegradationEstimate(1.8, 0, 0, {})
-    hard, _ = replace_surface(
+    hard, hard_report = replace_surface(
         rgb,
         mask,
         quad,
@@ -126,5 +126,75 @@ def test_sparse_outer_support_does_not_receive_full_strength_correction():
     )
     hard_delta = np.abs(hard[29, 50].astype(float) - rgb[29, 50]).mean()
     soft_delta = np.abs(soft[29, 50].astype(float) - rgb[29, 50]).mean()
-    assert hard_delta > 0
-    assert soft_delta < hard_delta * 0.8
+    if hard_report["boundary"]["background_repair"]["reliable"]:
+        assert hard_delta > 0
+        assert soft_delta < hard_delta * 0.8
+    else:
+        assert soft_delta == hard_delta == 0
+    assert soft[60, 140, 1] < 50
+
+
+def test_near_edge_enclosed_hole_cannot_be_expanded_despite_same_surface_color():
+    rgb, mask, quad = scene()
+    mask[50:60, 32:34] = 0
+    hole = np.zeros(mask.shape, bool)
+    hole[50:60, 32:34] = True
+    estimate = estimate_boundary(rgb, mask, quad, blur_sigma=0)
+    x0, y0, x1, y1 = estimate.bbox_xyxy
+    local_hole = hole[y0:y1, x0:x1]
+    assert estimate.protected[local_hole].all()
+    assert not estimate.support[local_hole].any()
+    assert estimate.diagnostics["enclosed_missing_pixels"] == 20
+    assert estimate.diagnostics["needs_review"]
+    template = Template(
+        np.full((60, 180, 3), 15, np.uint8), np.ones((60, 180), np.float32), {}
+    )
+    appearance = AppearanceEstimate(
+        1,
+        np.zeros((60, 180, 3), np.float32),
+        np.ones(3),
+        np.ones((60, 180), np.float32),
+        {},
+    )
+    degradation = DegradationEstimate(0, 0, 0, {})
+    output, _ = replace_surface(
+        rgb,
+        mask,
+        quad,
+        template,
+        0,
+        appearance_estimate=appearance,
+        degradation_estimate=degradation,
+    )
+    np.testing.assert_array_equal(output[hole], rgb[hole])
+
+
+def test_default_blur_uses_injected_zero_degradation_without_legacy_focus_floor():
+    from dataclasses import replace
+
+    from apexveil.estimation import get_default_estimators
+
+    class ZeroDegradation:
+        def estimate(self, rgb, mask, quad):
+            return DegradationEstimate(0, 0, 0, {"provider": "zero-test"})
+
+    rgb, mask, quad = scene()
+    template = Template(
+        np.full((60, 180, 3), 15, np.uint8), np.ones((60, 180), np.float32), {}
+    )
+    estimators = replace(get_default_estimators(), degradation=ZeroDegradation())
+    _, detail = replace_surface(rgb, mask, quad, template, estimators=estimators)
+    assert detail["blur_sigma_px"] == 0
+
+
+def test_explicit_numeric_blur_override_is_never_raised_to_estimated_sigma():
+    rgb, mask, quad = scene()
+    template = Template(
+        np.full((60, 180, 3), 15, np.uint8), np.ones((60, 180), np.float32), {}
+    )
+    degradation = DegradationEstimate(5, 0, 0, {})
+    for override in (0, 0.35, 2):
+        _, detail = replace_surface(
+            rgb, mask, quad, template, override, degradation_estimate=degradation
+        )
+        assert detail["blur_sigma_px"] == override

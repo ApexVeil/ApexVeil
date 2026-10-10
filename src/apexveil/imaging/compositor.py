@@ -13,6 +13,7 @@ import numpy as np
 from PIL import Image
 
 from .appearance import estimate_context_tint, render_appearance
+from .background import estimate_background_repair
 from .color import linear, srgb
 from .degradation import apply_capture_noise
 
@@ -74,7 +75,7 @@ def replace_surface(
     mask,
     quad,
     template: Template,
-    blur_sigma=0.35,
+    blur_sigma=None,
     *,
     appearance_reference=None,
     appearance_parameter_filter=None,
@@ -87,8 +88,6 @@ def replace_surface(
     estimators=None,
 ):
     """Insert a material, retaining visible-mask holes and rounded artwork."""
-    if not np.isfinite(blur_sigma) or blur_sigma < 0 or blur_sigma > 20:
-        raise ValueError("blur_sigma must be between 0 and 20 image pixels")
     if estimators is None:
         from apexveil.estimation import get_default_estimators
 
@@ -96,10 +95,11 @@ def replace_surface(
     degradation = degradation_estimate or estimators.degradation.estimate(
         rgb, mask, quad
     )
-    # A zero blur is an explicit caller request. Other callers can inject their
-    # own estimated degradation; default estimation never sharpens the source.
-    if blur_sigma > 0:
-        blur_sigma = max(float(blur_sigma), degradation.sigma_px)
+    # None delegates entirely to the selected estimator. Every numeric value,
+    # including zero, is an explicit override and must not be silently raised.
+    blur_sigma = float(degradation.sigma_px if blur_sigma is None else blur_sigma)
+    if not np.isfinite(blur_sigma) or not 0 <= blur_sigma <= 20:
+        raise ValueError("blur_sigma must be between 0 and 20 image pixels")
     boundary = boundary_estimate or estimators.boundary.estimate(
         rgb, mask, quad, protected_mask=protected_mask, blur_sigma=blur_sigma
     )
@@ -174,27 +174,19 @@ def replace_surface(
     # Remove the old surface beneath the optical transition. Inpainting the
     # whole visible region supplies nearby background at its exterior only;
     # the opaque material hides the unconstrained interior reconstruction.
-    cleanup = visible & (alpha < 0.985)
-    background = original.copy()
-    if cleanup.any():
-        repair_region = np.zeros(visible.shape, np.uint8)
-        cv2.fillConvexPoly(repair_region, np.rint(quad - [x0, y0]).astype(np.int32), 1)
-        repair_region = ((repair_region > 0) | visible).astype(np.uint8)
-        # Optical edge mixtures contaminate nearby background donors. Exclude
-        # that bounded band from the reconstruction input, not from output
-        # protection: only the declared support can receive repaired pixels.
-        donor_gap = max(1, min(10, round(blur_sigma * 2 + 1)))
-        donor_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE, (donor_gap * 2 + 1,) * 2
-        )
-        repair_region = (cv2.dilate(repair_region, donor_kernel) > 0) & ~protection
-        restored = cv2.inpaint(
-            original,
-            repair_region.astype(np.uint8) * 255,
-            max(2, min(8, boundary.diagnostics.get("band_px", 3))),
-            cv2.INPAINT_TELEA,
-        )
-        background[cleanup] = restored[cleanup]
+    requested_cleanup = visible & (alpha < 0.985)
+    plane = np.zeros(visible.shape, np.uint8)
+    cv2.fillConvexPoly(plane, np.rint(quad - [x0, y0]).astype(np.int32), 1)
+    repair = estimate_background_repair(
+        original,
+        plane,
+        visible,
+        protection,
+        requested_cleanup,
+        blur_sigma=blur_sigma,
+        radius=max(2, min(8, boundary.diagnostics.get("band_px", 3))),
+    )
+    background, cleanup = repair.rgb, repair.applied_mask
     result = srgb(linear(background) * (1 - alpha[:, :, None]) + pm)
     noised = apply_capture_noise(result, degradation, noise_seed)
     # Capture noise belongs to the material and reconstructed background.
@@ -209,6 +201,23 @@ def replace_surface(
     ).astype(np.uint8)
     support = boundary.support & ~protection
     coverage = getattr(boundary, "coverage", None)
+    retained_outer_band = np.zeros_like(support)
+    if not repair.diagnostics["reliable"]:
+        # Disagreeing donor layers also make fragmented exterior replacement
+        # unsafe: preserve the observed ridge continuously across that band.
+        # This deliberately leaves incomplete boundary replacement rather than
+        # cutting a real frame into pale/dark points with a binary SAM contour.
+        interior_distance = cv2.distanceTransform(plane, cv2.DIST_L2, 3)
+        uncertain_band = boundary.diagnostics.get("band_px", 3)
+        transition = max(1.5, min(3.0, blur_sigma * 2.0))
+        t = np.clip((interior_distance - uncertain_band) / transition, 0, 1)
+        geometric_coverage = t * t * (3 - 2 * t)
+        coverage = (
+            geometric_coverage
+            if coverage is None
+            else np.minimum(coverage, geometric_coverage)
+        )
+        retained_outer_band = support & (interior_distance <= uncertain_band)
     if coverage is not None:
         if coverage.shape != support.shape or not np.isfinite(coverage).all():
             raise ValueError("Boundary coverage must be finite and match local support")
@@ -226,13 +235,28 @@ def replace_surface(
     boundary_diagnostics = dict(boundary.diagnostics)
     repair_fraction = float(cleanup.sum() / max(1, support.sum()))
     boundary_diagnostics["background_repair_fraction"] = repair_fraction
+    boundary_diagnostics["background_repair"] = repair.diagnostics
+    boundary_diagnostics["retained_uncertain_outer_band_pixels"] = int(
+        retained_outer_band.sum()
+    )
+    boundary_diagnostics["boundary_replacement_complete"] = not bool(
+        retained_outer_band.any()
+    )
+    boundary_diagnostics["ridge_policy"] = (
+        "source_outer_band_retained"
+        if retained_outer_band.any()
+        else "standard_material_coverage"
+    )
     boundary_diagnostics["needs_review"] = (
-        bool(boundary_diagnostics.get("needs_review", False)) or repair_fraction > 0.2
+        bool(boundary_diagnostics.get("needs_review", False))
+        or repair_fraction > 0.2
+        or not repair.diagnostics["reliable"]
     )
     return output, {
         "appearance": appearance,
         "bbox_xyxy": [x0, y0, x1, y1],
         "corner_cleanup_pixels": int(cleanup.sum()),
+        "requested_corner_cleanup_pixels": int(requested_cleanup.sum()),
         "blur_sigma_px": blur_sigma,
         "visibility_policy": "declared_local_support_and_protected_foreground",
         "boundary": boundary_diagnostics,

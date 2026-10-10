@@ -38,7 +38,21 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
     cv2.fillConvexPoly(plane, np.rint(q - [x0, y0]).astype(np.int32), 1)
     inside = cv2.distanceTransform(plane, cv2.DIST_L2, 3)
     absent = (plane > 0) & ~raw
-    protected = np.zeros_like(raw)
+    # Native absent holes are protected even beside the geometric boundary.
+    # Their color cannot prove they belong to the replaceable material.
+    _, missing_labels = cv2.connectedComponents((~raw).astype(np.uint8))
+    exterior_labels = np.unique(
+        np.concatenate(
+            [
+                missing_labels[0],
+                missing_labels[-1],
+                missing_labels[:, 0],
+                missing_labels[:, -1],
+            ]
+        )
+    )
+    enclosed = ~raw & ~np.isin(missing_labels, exterior_labels)
+    protected = enclosed.copy()
     count, labels, _stats, _ = cv2.connectedComponentsWithStats(absent.astype(np.uint8))
     # Protect absent interior evidence. A component may also contain a missed
     # outer strip, so do not label the entire connected component foreground.
@@ -105,6 +119,7 @@ def estimate_boundary(rgb, visible_mask, quad, *, protected_mask=None, blur_sigm
             "observed_pixels": int(raw.sum()),
             "expanded_pixels": int(expansion.sum()),
             "protected_pixels": int(protected.sum()),
+            "enclosed_missing_pixels": int(enclosed.sum()),
             "edit_support_pixels": int(visible.sum()),
             "background_recovery": "bounded_local_inpaint_approximation",
             "protection_confidence": "explicit"
