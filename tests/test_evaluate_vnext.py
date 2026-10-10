@@ -1,7 +1,9 @@
+import hashlib
 import json
 import subprocess
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from apexveil.estimation import (
@@ -10,8 +12,17 @@ from apexveil.estimation import (
     DeterministicDegradation,
     Estimators,
 )
+from apexveil.imaging.compositor import load_template
+from apexveil.imaging.degradation import DegradationEstimate
 from apexveil.imaging.geometry import SurfaceGeometry
-from scripts.evaluate_vnext import _frame_seed, _is_replaceable, render_vnext
+from apexveil.imaging.photometry import TemporalPhotometry
+from apexveil.video_pipeline import render_surface_pair
+from scripts.evaluate_vnext import (
+    _frame_seed,
+    _is_replaceable,
+    _render_replacement,
+    render_vnext,
+)
 
 
 class FixedGeometry:
@@ -81,7 +92,9 @@ def _fixture(tmp_path, kind="shot"):
         traffic[49:59, 74:86] = 255
         Image.fromarray(plate).save(folder / "target.png")
         Image.fromarray(traffic).save(folder / "traffic.png")
-    _write_video(root / "shots" / "shot_000.mkv", frames)
+    source_video = root / "shots" / "shot_000.mkv"
+    _write_video(source_video, frames)
+    resource_sha256 = hashlib.sha256(source_video.read_bytes()).hexdigest()
     records = [
         {
             "frame_index": i,
@@ -93,7 +106,14 @@ def _fixture(tmp_path, kind="shot"):
         for i in range(5)
     ]
     (tracking / "report.json").write_text(
-        json.dumps({"shot_id": "shot_000", "frame_count": 5, "frames": records})
+        json.dumps(
+            {
+                "shot_id": "shot_000",
+                "resource_sha256": resource_sha256,
+                "frame_count": 5,
+                "frames": records,
+            }
+        )
     )
     manifest = {
         "schema_version": 1,
@@ -183,6 +203,7 @@ def test_five_frame_subset_exports_replace_and_blur_with_raw_masks(tmp_path):
 
 def test_non_plate_categories_are_passthrough_and_background_only_blurs(tmp_path):
     root, template, estimators, source_frames = _fixture(tmp_path, kind="no_plate")
+    (root / "tracking" / "shot_000" / "report.json").unlink()
     result = render_vnext(
         root,
         tmp_path / "passthrough",
@@ -192,6 +213,7 @@ def test_non_plate_categories_are_passthrough_and_background_only_blurs(tmp_path
         estimators=estimators,
     )
     assert all(row["status"] == "passthrough_no_plate" for row in result["frames"])
+    assert result["shots"][0]["tracking"]["status"] == "not_applicable"
     encoded = subprocess.run(
         [
             "ffmpeg",
@@ -345,3 +367,134 @@ def test_core_valid_quad_is_not_blocked_by_uncalibrated_flags_or_confidence():
 def test_vnext_noise_seed_matches_shared_video_formula():
     assert _frame_seed(100, 0) == 100 * 1_000_003 + 9_176
     assert _frame_seed(100, 4) == 100 * 1_000_003 + 5 * 9_176
+
+
+class ZeroDegradation:
+    def estimate(self, rgb, mask, quad):
+        return DegradationEstimate(0.0, 0.0, 0.0, {"method": "zero-test"})
+
+
+def test_zero_degradation_matches_shared_video_compositor(tmp_path):
+    _root, template_path, estimators, _ = _fixture(tmp_path)
+    template = load_template(template_path)
+    estimators = Estimators(
+        geometry=estimators.geometry,
+        boundary=estimators.boundary,
+        degradation=ZeroDegradation(),
+        appearance=estimators.appearance,
+        provider_id="zero-degradation-test",
+    )
+    rgb = np.full((72, 96, 3), 80, np.uint8)
+    mask = np.zeros((72, 96), np.uint8)
+    mask[26:44, 28:69] = 1
+    yy, xx = np.mgrid[:18, :41]
+    rgb[26:44, 28:69] = np.stack(
+        [100 + xx % 80, 110 + yy % 70, 120 + (xx + yy) % 60], axis=-1
+    ).astype(np.uint8)
+    quad = np.array([[28, 26], [68, 26], [68, 43], [28, 43]], np.float32)
+    geometry = SurfaceGeometry(quad, mask, 1.0, [], {"cut_before": True})
+    photometry = TemporalPhotometry(30)
+    core = render_surface_pair(
+        rgb,
+        mask,
+        geometry,
+        geometry,
+        template,
+        estimators,
+        photometry,
+        100 * 1_000_003 + 9_176,
+    )
+    actual, metadata, support = _render_replacement(
+        rgb,
+        mask,
+        quad,
+        template,
+        estimators,
+        TemporalPhotometry(30),
+        100 * 1_000_003 + 9_176,
+    )
+    assert actual is not None
+    assert metadata["blur_sigma_px"] == 0.0
+    assert np.array_equal(actual, core[1])
+    assert support["support"].any()
+
+
+def test_manifest_exclusion_overrides_primary_for_both_variants(tmp_path):
+    root, template, estimators, _ = _fixture(tmp_path)
+    manifest_path = root / "shot_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["shots"][0]["exclude_ids"] = [0, 8]
+    manifest_path.write_text(json.dumps(manifest))
+    result = render_vnext(
+        root,
+        tmp_path / "excluded-primary",
+        template_path=template,
+        shot_ids=["shot_000"],
+        workers=1,
+        estimators=estimators,
+    )
+    row = result["frames"][0]
+    assert row["primary_ids"] == [0]
+    assert row["selected_ids"] == []
+    assert row["exclude_ids"] == [0, 8]
+    assert not any(
+        action.get("object_id") == 0 and action["action"] in {"replace", "blur_variant"}
+        for action in row["actions"]
+    )
+    decoded = {}
+    for variant, path in result["output_paths"].items():
+        raw = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                path,
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        decoded[variant] = np.frombuffer(raw, np.uint8).reshape(120, 288, 3)
+    for variant in ("replace", "blur"):
+        left = decoded[variant][48:, :96].astype(np.int16)
+        right = decoded[variant][48:, 192:288].astype(np.int16)
+        assert np.mean(np.abs(left[26:44, 28:69] - right[26:44, 28:69])) < 4
+        assert np.mean(np.abs(left[49:59, 74:86] - right[49:59, 74:86])) < 4
+
+
+def test_tracking_resource_hash_rejects_stale_and_wrong_provenance(tmp_path):
+    root, template, estimators, frames = _fixture(tmp_path)
+    report_path = root / "tracking" / "shot_000" / "report.json"
+    report = json.loads(report_path.read_text())
+    report["resource_sha256"] = "0" * 64
+    report_path.write_text(json.dumps(report))
+    with pytest.raises(ValueError, match="resource hash mismatch"):
+        render_vnext(
+            root,
+            tmp_path / "wrong-report-hash",
+            template_path=template,
+            shot_ids=["shot_000"],
+            workers=1,
+            estimators=estimators,
+        )
+
+    root, template, estimators, frames = _fixture(tmp_path / "replacement")
+    changed = [frame.copy() for frame in frames]
+    changed[0][0, 0] = [1, 2, 3]
+    _write_video(root / "shots" / "shot_000.mkv", changed)
+    with pytest.raises(ValueError, match="resource hash mismatch"):
+        render_vnext(
+            root,
+            tmp_path / "same-size-replacement",
+            template_path=template,
+            shot_ids=["shot_000"],
+            workers=1,
+            estimators=estimators,
+        )

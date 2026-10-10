@@ -76,20 +76,38 @@ def _decode_shot(path: Path, expected_count: int) -> list[np.ndarray]:
     return frames
 
 
-def _load_tracking(root: Path, shot: dict, frame_count: int, shape: tuple[int, int]):
+def _load_tracking(
+    root: Path, shot: dict, frame_count: int, shape: tuple[int, int], source_video: Path
+):
     report_path = root / "tracking" / shot["id"] / "report.json"
     if not report_path.is_file():
-        return (
-            [{"frame_index": i, "objects": []} for i in range(frame_count)],
-            [{} for _ in range(frame_count)],
-            [
-                {"frame_index": i, "reason": "tracking_report_missing"}
-                for i in range(frame_count)
-            ],
-            {"path": str(report_path), "status": "missing"},
+        if shot["kind"] in PASSTHROUGH_KINDS:
+            return (
+                [{"frame_index": i, "objects": []} for i in range(frame_count)],
+                [{} for _ in range(frame_count)],
+                [],
+                {
+                    "path": str(report_path),
+                    "status": "not_applicable",
+                    "source_video_sha256": file_sha256(source_video),
+                },
+            )
+        raise FileNotFoundError(
+            f"Tracking report missing for {shot['id']}: {report_path}"
         )
 
     report = json.loads(report_path.read_text())
+    expected_hash = report.get("resource_sha256")
+    if not expected_hash:
+        raise ValueError(
+            f"Tracking report for {shot['id']} lacks resource_sha256: {report_path}"
+        )
+    actual_hash = file_sha256(source_video)
+    if expected_hash != actual_hash:
+        raise ValueError(
+            f"Tracking resource hash mismatch for {shot['id']}: "
+            f"report={expected_hash}, current={actual_hash}"
+        )
     records = report.get("frames", [])
     records_by_index: dict[int, dict] = {}
     duplicate_indexes = set()
@@ -170,7 +188,8 @@ def _load_tracking(root: Path, shot: dict, frame_count: int, shape: tuple[int, i
         "expected_frame_count": frame_count,
         "native_error": report.get("native_error"),
         "kind": report.get("kind"),
-        "resource_sha256": report.get("resource_sha256"),
+        "resource_sha256": expected_hash,
+        "source_video_sha256": actual_hash,
         "point_prompts": report.get("point_prompts"),
         "report_sha256": file_sha256(report_path),
     }
@@ -257,14 +276,13 @@ def _render_replacement(
             },
             {},
         )
-    sigma = 0.35
     support = {}
     generated, metadata = replace_surface(
         rgb,
         mask,
         quad,
         template,
-        sigma,
+        None,
         appearance_reference=reference,
         appearance_parameter_filter=photometry.filter,
         noise_seed=seed,
@@ -349,7 +367,7 @@ def _process_shot(
     if any(frame.shape != (height, width, 3) for frame in frames):
         raise ValueError(f"Shot {shot['id']} changes dimensions within its interval")
     records, frame_masks, mask_errors, tracking_status = _load_tracking(
-        root, shot, len(frames), (height, width)
+        root, shot, len(frames), (height, width), source_path
     )
     native_ids = sorted({oid for masks in frame_masks for oid in masks})
     # Include IDs explicitly returned in report rows even if every mask file is missing.
@@ -361,8 +379,9 @@ def _process_shot(
             for obj in record.get("objects", [])
         }
     )
-    selected_ids = sorted(set(map(int, shot.get("primary_ids") or [])))
+    declared_primary_ids = sorted(set(map(int, shot.get("primary_ids") or [])))
     excluded = set(map(int, shot.get("exclude_ids") or []))
+    selected_ids = sorted(set(declared_primary_ids) - excluded)
     primary_masks = {
         identity: _load_identity_masks(frame_masks, identity, (height, width))
         for identity in selected_ids
@@ -418,7 +437,11 @@ def _process_shot(
         else:
             frame_status = "rendered_unreviewed"
             if shot["kind"] == "shot" and not selected_ids:
-                flags.append("primary_ids_empty")
+                flags.append(
+                    "primary_ids_excluded"
+                    if declared_primary_ids
+                    else "primary_ids_empty"
+                )
             # Blur every non-excluded native mask in both output variants.
             # Background shots have no primary selection, so traffic plates only blur.
             for object_id in sorted(masks):
@@ -565,7 +588,8 @@ def _process_shot(
                 "kind": shot["kind"],
                 "status": frame_status,
                 "flags": sorted(set(flags)),
-                "primary_ids": selected_ids,
+                "primary_ids": declared_primary_ids,
+                "selected_ids": selected_ids,
                 "exclude_ids": sorted(excluded),
                 "native_returned_ids": raw_ids,
                 "missing_mask_ids": missing_ids,
@@ -591,7 +615,8 @@ def _process_shot(
         "tracking": tracking_status,
         "mask_errors": mask_errors,
         "native_ids": native_ids,
-        "primary_ids": selected_ids,
+        "primary_ids": declared_primary_ids,
+        "selected_ids": selected_ids,
         "exclude_ids": sorted(excluded),
         "estimator_errors": estimator_errors,
         "frames": rows,
