@@ -5,6 +5,7 @@ physical plane. Priors and agent guidance are explicit hypotheses, never truth.
 """
 
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 import cv2
 import numpy as np
@@ -151,8 +152,53 @@ def _anchor_initial(fragment, labels, anchor_quad):
     censored = [i for i, label in enumerate(labels) if label != "surface"]
     if len(censored) == 1:
         return _complete_side(fragment, censored[0], 1, anchor_quad)
+    if censored:
+        raise ValueError(
+            "More than one censored side requires an explicit full-plane hypothesis"
+        )
     # Full visible face: use the current line fit for registration initialization.
     return fragment.copy()
+
+
+def _anchor_opposite_edge_completion(mask, anchor_quad, missing):
+    """Use the visible opposite side when cropped adjacent sides are too short.
+
+    A narrow viewport fragment cannot constrain its top/bottom directions
+    reliably. Preserve the anchor's normalized projective shape and fit its
+    visible side to the source mask envelope instead of extending noisy lines.
+    """
+    if missing not in (1, 3):
+        return None
+    rows = np.flatnonzero(np.any(mask > 0, axis=1))
+    if len(rows) < 8:
+        return None
+    points = []
+    for y in rows:
+        columns = np.flatnonzero(mask[y] > 0)
+        x = columns.min() if missing == 1 else columns.max()
+        points.append([x, y])
+    points = np.asarray(points, np.float32)
+    fit = points[
+        (points[:, 1] > rows.min() + 0.1 * np.ptp(rows))
+        & (points[:, 1] < rows.max() - 0.1 * np.ptp(rows))
+    ]
+    vx, vy, x, y = cv2.fitLine(fit, cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
+    if abs(vy) < 0.1:
+        return None
+    ends_y = np.array([rows.min(), rows.max()], np.float32)
+    ends = np.column_stack([x + (ends_y - y) * vx / vy, ends_y])
+    a, b = (
+        (anchor_quad[0], anchor_quad[3])
+        if missing == 1
+        else (anchor_quad[1], anchor_quad[2])
+    )
+    u = b - a
+    v = ends[1] - ends[0]
+    denominator = max(float(u @ u), 1e-6)
+    cosine = float(u @ v) / denominator
+    sine = float(np.cross(u, v)) / denominator
+    transform = np.array([[cosine, -sine], [sine, cosine]], np.float32)
+    return ((anchor_quad - a) @ transform.T + ends[0]).astype(np.float32)
 
 
 def _direct_register(rgb, mask, anchor, initial, aspect):
@@ -249,7 +295,10 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
         guidance = {**guidance, **guidance["geometry"]}
     if guidance.get("coordinate_space", "source") != "source":
         raise ValueError("Guidance corners must be converted to source pixels")
-    if "physical_aspect_guess" in guidance and "physical_aspect" not in guidance:
+    if (
+        guidance.get("physical_aspect_guess") is not None
+        and "physical_aspect" not in guidance
+    ):
         guidance["physical_aspect"] = guidance["physical_aspect_guess"]
     anchors = list(anchors or [])[:8]
     if np.count_nonzero(mask) < 16:
@@ -350,12 +399,20 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
     )
 
     supplied = guidance.get("candidate_quads", [])[:6]
-    for supplied_quad in supplied:
+    rejected_guidance = []
+    for supplied_index, supplied_quad in enumerate(supplied):
         supplied_quad = (
             supplied_quad.get("quad")
             if isinstance(supplied_quad, dict)
             else supplied_quad
         )
+        try:
+            supplied_quad = order_quad(supplied_quad)
+        except (ValueError, TypeError, cv2.error):
+            rejected_guidance.append(
+                {"index": supplied_index, "reason": "invalid_quad"}
+            )
+            continue
         add(
             supplied_quad,
             0.70,
@@ -385,6 +442,19 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
             "anchor_source": anchor.get("source"),
             "direct_anchor_not_adjacent_chain": True,
         }
+        if len(censored) == 1 and labels[censored[0]] == "crop":
+            edge_completion = _anchor_opposite_edge_completion(mask, aq, censored[0])
+            if edge_completion is not None:
+                add(
+                    edge_completion,
+                    0.69,
+                    ["same_identity_visible_anchor", "source_opposite_edge_envelope"],
+                    ["anchor_pose_assumed_over_narrow_crop"],
+                    {
+                        **provenance,
+                        "retry_reason": "short_cropped_edges_may_be_ill_conditioned",
+                    },
+                )
         add(
             initial,
             0.77,
@@ -437,6 +507,8 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
                 ],
                 {"foreshortening_factor": float(factor)},
             )
+    for proposal in proposals:
+        proposal.diagnostics["rejected_guidance_candidates"] = rejected_guidance
     proposals.sort(key=lambda c: c.diagnostics["ranking_score"], reverse=True)
     return proposals
 
@@ -448,3 +520,73 @@ def select_scene_geometry(candidates):
         key=lambda c: c.diagnostics.get("ranking_score", -1),
         default=None,
     )
+
+
+def select_scene_trajectory(candidate_lists):
+    """Select a consistent candidate path without smoothing screen coordinates.
+
+    Translation and image scale are not penalized. The local regularizer acts
+    only on normalized side lengths and anchor switching. Empty visibility
+    segments remain None and break the path; no mask or plane is invented there.
+    """
+
+    def shape(candidate):
+        lengths = np.linalg.norm(
+            np.roll(candidate.quad, -1, axis=0) - candidate.quad, axis=1
+        )
+        return np.log(np.maximum(lengths[[0, 2, 3]], 1e-4) / max(lengths[1], 1e-4))
+
+    output = [None] * len(candidate_lists)
+    start = 0
+    while start < len(candidate_lists):
+        if not any(
+            c.diagnostics.get("eligible_for_render") for c in candidate_lists[start]
+        ):
+            start += 1
+            continue
+        segment = []
+        end = start
+        while end < len(candidate_lists):
+            eligible = [
+                c
+                for c in candidate_lists[end]
+                if c.diagnostics.get("eligible_for_render")
+            ]
+            if not eligible:
+                break
+            segment.append(eligible)
+            end += 1
+        cost = -np.log(
+            [max(c.diagnostics.get("ranking_score", 0), 1e-6) for c in segment[0]]
+        )
+        backpointers = []
+        for previous, current in pairwise(segment):
+            current_cost = []
+            indices = []
+            for candidate in current:
+                transitions = []
+                for prior in previous:
+                    delta = np.linalg.norm(shape(candidate) - shape(prior))
+                    shape_cost = min(0.5, 0.6 * delta)
+                    a = candidate.diagnostics.get("anchor_frame")
+                    b = prior.diagnostics.get("anchor_frame")
+                    switch_cost = (
+                        0.12 if a is not None and b is not None and a != b else 0
+                    )
+                    transitions.append(shape_cost + switch_cost)
+                values = cost + transitions
+                index = int(np.argmin(values))
+                indices.append(index)
+                current_cost.append(
+                    values[index]
+                    - np.log(max(candidate.diagnostics.get("ranking_score", 0), 1e-6))
+                )
+            backpointers.append(indices)
+            cost = np.asarray(current_cost)
+        index = int(np.argmin(cost))
+        for offset in range(len(segment) - 1, -1, -1):
+            output[start + offset] = segment[offset][index]
+            if offset:
+                index = backpointers[offset - 1][index]
+        start = end
+    return output

@@ -128,3 +128,72 @@ def test_crop_local_guidance_is_rejected_before_pixel_interpretation():
         propose_scene_geometry(
             image, mask, aspect=3, guidance={"coordinate_space": "crop"}
         )
+
+
+def test_trajectory_selection_follows_acceleration_without_position_smoothing():
+    from apexveil.imaging.scene_geometry import (
+        SceneGeometryCandidate,
+        select_scene_trajectory,
+    )
+
+    _, _, truth = scene()
+    lists = []
+    offsets = [0, 2, 8, 20, 40]
+    for i, offset in enumerate(offsets):
+        a = SceneGeometryCandidate(
+            truth + [offset, 0],
+            0.8,
+            [],
+            [],
+            {
+                "eligible_for_render": True,
+                "ranking_score": 0.8 if i % 2 else 0.78,
+                "anchor_frame": 0,
+            },
+        )
+        b = SceneGeometryCandidate(
+            truth + [offset, 0],
+            0.8,
+            [],
+            [],
+            {
+                "eligible_for_render": True,
+                "ranking_score": 0.78 if i % 2 else 0.8,
+                "anchor_frame": 4,
+            },
+        )
+        b.quad = b.quad.copy()
+        b.quad[[1, 2], 0] += 10
+        lists.append([a, b])
+    selected = select_scene_trajectory(lists)
+    assert len({c.diagnostics["anchor_frame"] for c in selected}) == 1
+    for previous, current, dx in zip(selected, selected[1:], np.diff(offsets)):
+        np.testing.assert_allclose(
+            current.quad - previous.quad, np.tile([dx, 0], (4, 1))
+        )
+    assert select_scene_trajectory([lists[0], [], lists[2]])[1] is None
+
+
+def test_narrow_crop_retries_with_visible_opposite_edge_and_anchor_shape():
+    reference, amask, aq = scene()
+    current, mask, truth = scene(205)
+    candidates = propose_scene_geometry(
+        current,
+        mask,
+        aspect=179 / 59,
+        anchors=[{"rgb": reference, "mask": amask, "quad": aq, "frame_index": 2}],
+    )
+    envelope = [c for c in candidates if "source_opposite_edge_envelope" in c.evidence]
+    assert envelope
+    assert envelope[0].diagnostics["eligible_for_render"]
+    assert np.max(np.linalg.norm(envelope[0].quad - truth, axis=1)) < 3
+
+
+def test_malformed_agent_quad_does_not_abort_other_scene_hypotheses():
+    image, mask, _ = scene(-80)
+    candidates = propose_scene_geometry(
+        image, mask, aspect=3, guidance={"candidate_quads": [None, [[1, 2]]]}
+    )
+    best = select_scene_geometry(candidates)
+    assert best is not None
+    assert len(best.diagnostics["rejected_guidance_candidates"]) == 2
