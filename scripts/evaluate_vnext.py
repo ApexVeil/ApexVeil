@@ -9,18 +9,30 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
+
+# Environment variables must be set before importing NumPy/OpenCV so backend
+# libraries cannot create nested worker pools.
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from apexveil.diagnostic_export import color_native_masks, stable_color
 from apexveil.estimation import Estimators, get_default_estimators
-from apexveil.imaging.compositor import load_template, redact_surface, replace_surface
+from apexveil.imaging.compositor import (
+    load_template,
+    redact_surface,
+    replace_surface,
+)
 from apexveil.imaging.offline_geometry import SurfaceGeometry
 from apexveil.imaging.photometry import TemporalPhotometry
 from apexveil.imaging.temporal import rectified_visible_reference
@@ -372,7 +384,7 @@ def _process_shot(
     estimates = {}
     estimator_errors = {}
     if shot["kind"] == "shot":
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=min(workers, 2)) as pool:
             futures = {
                 pool.submit(
                     _estimate_identity,
@@ -400,6 +412,7 @@ def _process_shot(
         global_index = int(shot["start_frame"]) + local_index
         replace = rgb.copy()
         blur = rgb.copy()
+        declared_support = np.zeros((height, width), dtype=bool)
         flags = []
         actions = []
         missing_ids = sorted(
@@ -504,38 +517,41 @@ def _process_shot(
                             if generated is None:
                                 raise ValueError(comp_meta["reason"])
                             _blend_supported(replace, generated, support)
+                            if support:
+                                x0, y0, x1, y1 = support["bbox_xyxy"]
+                                declared_support[y0:y1, x0:x1] |= support["support"]
+                                item["declared_support"] = {
+                                    "bbox_xyxy": support["bbox_xyxy"],
+                                    "pixels": int(np.count_nonzero(support["support"])),
+                                }
                             item["action"] = "replace"
                             item["compositor"] = comp_meta
                             if geometry_review_flags(estimate) or comp_meta.get(
                                 "boundary", {}
                             ).get("needs_review"):
                                 flags.append("geometry_or_boundary_needs_review")
-                        except Exception as error:  # noqa: BLE001 - record error and use blur fallback
+                        except Exception as error:  # noqa: BLE001 - record compositor rejection
                             photometry[identity].reset()
-                            replace, blur_meta = redact_surface(replace, mask, "blur")
-                            item["action"] = "blur_fallback_after_compositor_error"
+                            item["action"] = "replacement_rejected_compositor_error"
                             item["compositor_error"] = (
                                 f"{type(error).__name__}: {error}"
                             )
-                            item["fallback_blur"] = blur_meta
-                            flags.append("replacement_rejected_blur_fallback")
+                            flags.append("replacement_rejected")
                     else:
                         photometry[identity].reset()
                         if estimate is None:
                             flags.append("geometry_estimation_failed")
                         else:
                             flags.append("geometry_quad_rejected")
-                        replace, blur_meta = redact_surface(replace, mask, "blur")
-                        item["action"] = "blur_fallback_after_geometry_rejection"
-                        item["fallback_blur"] = blur_meta
+                        item["action"] = "replacement_rejected_geometry"
                     actions.append(item)
             if missing_ids:
                 frame_status = "needs_review_missing_masks"
             elif any(
-                action.get("action", "").startswith("blur_fallback")
+                action.get("action", "").startswith("replacement_rejected")
                 for action in actions
             ):
-                frame_status = "needs_review_blur_fallback"
+                frame_status = "needs_review_replacement_rejected"
             elif flags:
                 frame_status = "needs_review"
         # Explicit safety checks constrain all edits to raw visible masks.
@@ -544,6 +560,7 @@ def _process_shot(
             for object_id, mask in masks.items():
                 if object_id not in excluded:
                     allowed |= mask > 0
+            allowed |= declared_support
         for label, output in (("replace", replace), ("blur", blur)):
             outside = int(np.count_nonzero(np.any(output != rgb, axis=2) & ~allowed))
             if outside:
@@ -762,6 +779,7 @@ def render_vnext(
         "template_sha256": template.metadata["source_sha256"],
         "estimators": estimators.metadata(),
         "cpu_workers": int(workers),
+        "geometry_workers": min(int(workers), 2),
         "encoder_threads_per_variant": 1,
         "gpu_used": False,
         "sam_inference_run": False,

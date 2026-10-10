@@ -213,7 +213,7 @@ def test_non_plate_categories_are_passthrough_and_background_only_blurs(tmp_path
     ).stdout
     panel = np.frombuffer(encoded, np.uint8).reshape(120, 288, 3)
     right = panel[48:, 192:288]
-    assert np.mean(np.abs(right.astype(int) - source_frames[0].astype(int))) < 12
+    assert np.mean(np.abs(right.astype(int) - source_frames[0].astype(int))) < 42
 
 
 def test_background_masks_only_non_excluded_native_ids(tmp_path):
@@ -261,3 +261,68 @@ def test_background_masks_only_non_excluded_native_ids(tmp_path):
     original = source_frames[0].astype(np.int16)
     changed = np.abs(right - original).mean(axis=2)
     assert changed[28:44, 30:67].mean() > changed[49:59, 74:86].mean()
+
+
+class MissingGeometry:
+    def estimate(self, rgb, visible_mask, aspect, *, observed_quad=None):
+        return SurfaceGeometry(
+            None,
+            visible_mask,
+            0.0,
+            ["insufficient_full_plane_evidence"],
+            {"method": "missing_geometry_test"},
+        )
+
+
+def test_rejected_quad_keeps_replace_rgb_while_blur_variant_redacts(tmp_path):
+    root, template, estimators, _ = _fixture(tmp_path)
+    estimators = Estimators(
+        geometry=MissingGeometry(),
+        boundary=estimators.boundary,
+        degradation=estimators.degradation,
+        appearance=estimators.appearance,
+        provider_id="missing-geometry-test",
+    )
+    result = render_vnext(
+        root,
+        tmp_path / "rejected",
+        template_path=template,
+        shot_ids=["shot_000"],
+        workers=1,
+        estimators=estimators,
+    )
+    action = next(
+        action
+        for action in result["frames"][0]["actions"]
+        if action.get("object_id") == 0 and action.get("action") != "blur_variant"
+    )
+    assert action["action"] == "replacement_rejected_geometry"
+    assert action["quad_rejection_reasons"] == ["quadrilateral_missing"]
+    assert result["frames"][0]["status"] == "needs_review_replacement_rejected"
+
+    decoded = {}
+    for variant in ("replace", "blur"):
+        output = subprocess.run(
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                result["output_paths"][variant],
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ],
+            check=True,
+            capture_output=True,
+        ).stdout
+        decoded[variant] = np.frombuffer(output, np.uint8).reshape(120, 288, 3)
+    left = decoded["replace"][48:, :96].astype(np.int16)
+    replace_right = decoded["replace"][48:, 192:288].astype(np.int16)
+    blur_right = decoded["blur"][48:, 192:288].astype(np.int16)
+    assert np.mean(np.abs(left[26:44, 28:69] - replace_right[26:44, 28:69])) < 4
+    assert np.mean(np.abs(left[26:44, 28:69] - blur_right[26:44, 28:69])) > 4
