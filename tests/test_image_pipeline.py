@@ -1,15 +1,15 @@
-from pathlib import Path
 import cv2
 import numpy as np
-from PIL import Image
 import pytest
+from PIL import Image
+
 from apexveil.backends.image import Detection
-from apexveil.image_pipeline import prepare_surfaces, render, process_image
+from apexveil.image_pipeline import prepare_surfaces, process_image, render
 from apexveil.imaging.compositor import (
     Template,
     load_template,
-    replace_surface,
     redact_surface,
+    replace_surface,
 )
 from apexveil.imaging.geometry import order_quad
 
@@ -141,7 +141,8 @@ def test_defocused_replacement_still_preserves_occluder_pixels():
     rgb, mask, quad, template = fixture_scene()
     output, detail = replace_surface(rgb, mask, quad, template, blur_sigma=8)
     assert np.array_equal(output[mask == 0], rgb[mask == 0])
-    assert detail["corner_cleanup_pixels"] == 0
+    assert detail["boundary"]["protected_pixels"] > 0
+    assert detail["corner_cleanup_pixels"] > 0
 
 
 def test_small_visible_fragment_is_not_stretched_into_full_artwork():
@@ -157,6 +158,31 @@ def test_small_visible_fragment_is_not_stretched_into_full_artwork():
 
 def test_compositor_diagnostics_are_json_serializable():
     import json
+
     rgb, mask, quad, template = fixture_scene()
     _, detail = replace_surface(rgb, mask, quad, template)
     json.dumps(detail)
+
+
+def test_comparison_exports_raw_sam_three_panel_diagnostics(tmp_path):
+    import json
+
+    rgb, mask, _, template = fixture_scene()
+    path = tmp_path / "source.png"
+    Image.fromarray(rgb).save(path)
+
+    class Segmenter:
+        def detect(self, image, prompt, refine):
+            return [Detection(0, 0.9, mask, {})], {"fixture": True}
+
+    out = tmp_path / "result"
+    report = process_image(path, out, Segmenter(), template=template, comparison=True)
+    assert (out / "index.html").is_file()
+    assert report["diagnostics"]["provenance"]["category"] == "automatic"
+    assert (
+        report["results"]["replace"]["outside_declared_edit_support_changed_pixels"]
+        == 0
+    )
+    for name in report["diagnostics"]["diagnostics"].values():
+        assert (out / name).is_file()
+    json.dumps(report)

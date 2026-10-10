@@ -8,13 +8,13 @@ ApexVeil is an independent project for scene-consistent automotive image and vid
 
 ## Status
 
-**Experimental image and bounded-video core / pre-alpha.** The image CLI supports transparent artwork replacement, blur and mosaic. A separate experimental video entry point reuses that compositor with motion-compensated geometry, short appearance state, explicit uncertainty and copied source audio. Multi-target treatment requires explicit selection.
+**Experimental compositing core / pre-alpha.** Images and videos share deterministic composition with automatic geometry, boundary, appearance and camera-degradation estimation. Offline video uses bidirectional motion consensus within reviewed shots. Estimator interfaces allow future learned modules without regenerating the supplied artwork. Multi-target treatment requires explicit selection. Difficult occlusion, clipping and optical-edge cases still require review.
 
 | Capability | Current scope |
 |---|---|
 | Still-image processing | CLI, directory batches, visible masks, corner corrections, replacement/blur/mosaic |
-| Short video composition | Bounded continuous-shot experiment, hard 4-second limit; 2-second and 2.5-second development cases |
-| Full video pipeline | Shot transitions, native VFR, long jobs and the full 70-second montage remain unfinished |
+| Short video composition | Bounded continuous-shot experiment; native SAM tracking and offline geometry |
+| Reviewed montage | Manifest-driven shots and source audio; a 70-second, 30 fps development montage. Automatic shot selection and native VFR are not implemented |
 | Interactive Web editor / AI review | Planned; neither is part of the current runtime |
 
 SAM3.1 is one model backend; ApexVeil's product and source are independent of upstream model naming and any other project.
@@ -46,7 +46,7 @@ CUDA_VISIBLE_DEVICES=0 apexveil image /path/to/photo.jpg \
   --template /path/to/artwork.png --output outputs/example --comparison
 ```
 
-The command saves effects, candidate masks, geometry previews and a JSON report.
+The command saves effects, native candidate masks, declared edit support, geometry previews and a JSON report. With `--comparison`, diagnostic panels expose RGB, raw SAM masks and the latest output.
 See [image pipeline documentation](docs/IMAGE_PIPELINE.md) for multi-target
 selection, manual corner overrides and current limitations.
 
@@ -72,6 +72,10 @@ Place a short video or numerically named JPEG frames in a private data directory
 CUDA_VISIBLE_DEVICES=0 apexveil smoke data/private/smoke-frames --max-frames 3 --output outputs/smoke
 python -m pytest -q
 ```
+
+## Estimation and evaluation
+
+See the [estimator contract](docs/ESTIMATOR_CONTRACT.md), [offline geometry](docs/offline-geometry-design.md) and [appearance estimator](docs/appearance-estimation.md). These documents distinguish implemented estimation from unresolved visual failures. Tests check compositing and tracking contracts; they do not certify photorealism or anonymization.
 
 ## Product direction
 
