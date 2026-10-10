@@ -1,17 +1,20 @@
 """Visibility-aware replacement and redaction, shared by still/video frames.
 
-All edits are restricted to the supplied visible mask. The inferred full plane
-never doubles as a compositing mask; holes may represent foreground occluders.
+Edits are restricted to declared local support and preserve protected foreground.
+The inferred plane is not visibility; ambiguous holes remain protected.
 """
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-import hashlib
+
 import cv2
 import numpy as np
 from PIL import Image
+
+from .appearance import estimate_context_tint, render_appearance
 from .color import linear, srgb
-from .appearance import adapt_asset, estimate_context_tint
+from .degradation import apply_capture_noise
 
 
 @dataclass
@@ -75,10 +78,31 @@ def replace_surface(
     *,
     appearance_reference=None,
     appearance_parameter_filter=None,
+    appearance_estimate=None,
+    boundary_estimate=None,
+    protected_mask=None,
+    degradation_estimate=None,
+    noise_seed=0,
+    edit_support_out=None,
+    estimators=None,
 ):
     """Insert a material, retaining visible-mask holes and rounded artwork."""
-    if blur_sigma < 0 or blur_sigma > 20:
+    if not np.isfinite(blur_sigma) or blur_sigma < 0 or blur_sigma > 20:
         raise ValueError("blur_sigma must be between 0 and 20 image pixels")
+    if estimators is None:
+        from apexveil.estimation import get_default_estimators
+
+        estimators = get_default_estimators()
+    degradation = degradation_estimate or estimators.degradation.estimate(
+        rgb, mask, quad
+    )
+    # A zero blur is an explicit caller request. Other callers can inject their
+    # own estimated degradation; default estimation never sharpens the source.
+    if blur_sigma > 0:
+        blur_sigma = max(float(blur_sigma), degradation.sigma_px)
+    boundary = boundary_estimate or estimators.boundary.estimate(
+        rgb, mask, quad, protected_mask=protected_mask, blur_sigma=blur_sigma
+    )
     th, tw = template.alpha.shape
     corners = np.array([[0, 0], [tw - 1, 0], [tw - 1, th - 1], [0, th - 1]], np.float32)
     homography = cv2.getPerspectiveTransform(corners, quad.astype(np.float32))
@@ -103,23 +127,26 @@ def replace_surface(
     else:
         light_reference = rect
     context_tint, context_detail = estimate_context_tint(rgb, mask, quad)
-    asset, appearance = adapt_asset(
+    estimated_appearance = appearance_estimate or estimators.appearance.estimate(
         template.rgb,
         light_reference,
         reference_percentile=99.5,
         match_black=True,
         valid_mask=rect_visibility,
         context_tint=context_tint,
-        ink_resolved=blur_sigma <= 1.5
-        and min(np.linalg.norm(quad[(i + 1) % 4] - quad[i]) for i in range(4)) >= 48,
+        ink_resolved=min(np.linalg.norm(quad[(i + 1) % 4] - quad[i]) for i in range(4))
+        / max(0.5, blur_sigma)
+        >= 60,
         context_black_level=context_detail.get("luminance_linear"),
         parameter_filter=appearance_parameter_filter,
     )
+    asset = render_appearance(template.rgb, estimated_appearance)
+    appearance = dict(estimated_appearance.diagnostics)
     appearance["context"] = context_detail
     appearance["reference"] = (
         "external_temporal" if appearance_reference is not None else "current_frame"
     )
-    x0, y0, x1, y1 = local_bounds(mask, 4)
+    x0, y0, x1, y1 = boundary.bbox_xyxy
     size = (x1 - x0, y1 - y0)
     transform = np.array([[1, 0, -x0], [0, 1, -y0], [0, 0, 1]], np.float64) @ homography
     alpha = cv2.warpPerspective(
@@ -134,42 +161,81 @@ def replace_surface(
     if blur_sigma:
         alpha = cv2.GaussianBlur(alpha, (0, 0), blur_sigma)
         pm = cv2.GaussianBlur(pm, (0, 0), blur_sigma)
-    visible = mask[y0:y1, x0:x1] > 0
+    protection = boundary.protected.copy()
+    if protected_mask is not None:
+        if protected_mask.shape != mask.shape:
+            raise ValueError("protected_mask must have the source mask shape")
+        protection |= protected_mask[y0:y1, x0:x1] > 0
+    visible = boundary.visible & ~protection
     visibility_weight = visible.astype(np.float32)
-    if blur_sigma > 1.5:
-        # A hard SAM threshold is not an optical edge. Feather inward only:
-        # protected background/occluder pixels remain untouched.
-        distance = cv2.distanceTransform(visible.astype(np.uint8), cv2.DIST_L2, 3)
-        visibility_weight *= np.clip(distance / max(1.0, blur_sigma * 0.75), 0.0, 1.0)
     alpha *= visibility_weight
     pm *= visibility_weight[:, :, None]
     original = rgb[y0:y1, x0:x1]
-    provisional = srgb(linear(original) * (1 - alpha[:, :, None]) + pm)
-    # Restrict corner cleanup to known surface pixels, never inferred holes.
-    polygon = np.zeros(visible.shape, np.uint8)
-    cv2.fillConvexPoly(polygon, np.rint(quad - [x0, y0]).astype(np.int32), 1)
-    cleanup = visible & (polygon > 0) & (alpha < 0.985)
-    if blur_sigma > 1.5:
-        cleanup[:] = False  # Inpainting a defocused boundary creates a hard cut.
+    # Remove the old surface beneath the optical transition. Inpainting the
+    # whole visible region supplies nearby background at its exterior only;
+    # the opaque material hides the unconstrained interior reconstruction.
+    cleanup = visible & (alpha < 0.985)
+    background = original.copy()
     if cleanup.any():
-        restored = cv2.inpaint(
-            provisional, cleanup.astype(np.uint8) * 255, 3, cv2.INPAINT_TELEA
+        repair_region = np.zeros(visible.shape, np.uint8)
+        cv2.fillConvexPoly(repair_region, np.rint(quad - [x0, y0]).astype(np.int32), 1)
+        repair_region = ((repair_region > 0) | visible).astype(np.uint8)
+        # Optical edge mixtures contaminate nearby background donors. Exclude
+        # that bounded band from the reconstruction input, not from output
+        # protection: only the declared support can receive repaired pixels.
+        donor_gap = max(1, min(10, round(blur_sigma * 2 + 1)))
+        donor_kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE, (donor_gap * 2 + 1,) * 2
         )
-        background = original.copy()
+        repair_region = (cv2.dilate(repair_region, donor_kernel) > 0) & ~protection
+        restored = cv2.inpaint(
+            original,
+            repair_region.astype(np.uint8) * 255,
+            max(2, min(8, boundary.diagnostics.get("band_px", 3))),
+            cv2.INPAINT_TELEA,
+        )
         background[cleanup] = restored[cleanup]
-    else:
-        background = original
     result = srgb(linear(background) * (1 - alpha[:, :, None]) + pm)
-    support = (alpha > 1e-6) | cleanup
+    noised = apply_capture_noise(result, degradation, noise_seed)
+    # Capture noise belongs to the material and reconstructed background.
+    result = np.clip(
+        np.rint(
+            result.astype(np.float32)
+            + (noised.astype(np.float32) - result.astype(np.float32))
+            * np.maximum(alpha, cleanup.astype(np.float32))[:, :, None]
+        ),
+        0,
+        255,
+    ).astype(np.uint8)
+    support = boundary.support & ~protection
     result[~support] = original[~support]
+    if edit_support_out is not None:
+        edit_support_out.update(
+            bbox_xyxy=boundary.bbox_xyxy,
+            support=support.copy(),
+            protected=protection.copy(),
+        )
     output = rgb.copy()
     output[y0:y1, x0:x1] = result
+    boundary_diagnostics = dict(boundary.diagnostics)
+    repair_fraction = float(cleanup.sum() / max(1, support.sum()))
+    boundary_diagnostics["background_repair_fraction"] = repair_fraction
+    boundary_diagnostics["needs_review"] = (
+        bool(boundary_diagnostics.get("needs_review", False)) or repair_fraction > 0.2
+    )
     return output, {
         "appearance": appearance,
         "bbox_xyxy": [x0, y0, x1, y1],
         "corner_cleanup_pixels": int(cleanup.sum()),
         "blur_sigma_px": blur_sigma,
-        "visibility_policy": "strict_source_mask",
+        "visibility_policy": "declared_local_support_and_protected_foreground",
+        "boundary": boundary_diagnostics,
+        "degradation": degradation.diagnostics,
+        "declared_edit_support": {
+            "bbox_xyxy": boundary.bbox_xyxy,
+            "pixels": int(support.sum()),
+        },
+        "noise_seed": int(noise_seed),
         "alpha": "premultiplied_linear",
     }
 

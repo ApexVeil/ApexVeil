@@ -1,8 +1,39 @@
 """Local illumination and additive-veil transfer, not physical relighting."""
 
+from dataclasses import dataclass
+
 import cv2
 import numpy as np
-from .color import linear, srgb, luma
+
+from .color import linear, luma, srgb
+
+
+@dataclass
+class AppearanceEstimate:
+    # Injectable material parameters in canonical linear RGB coordinates.
+    gain: float
+    black: np.ndarray
+    tint: np.ndarray
+    spatial_field: np.ndarray
+    diagnostics: dict
+
+    def render(self, asset):
+        if (
+            self.black.shape != asset.shape
+            or self.spatial_field.shape != asset.shape[:2]
+        ):
+            raise ValueError(
+                "Appearance estimate must match canonical asset dimensions"
+            )
+        values = (self.gain, self.black, self.tint, self.spatial_field)
+        if not all(np.isfinite(value).all() for value in values):
+            raise ValueError("Appearance estimate must be finite")
+        if self.gain < 0 or np.any(self.black < 0) or np.any(self.spatial_field < 0):
+            raise ValueError("Appearance estimate must be nonnegative")
+        return srgb(
+            linear(asset) * self.gain * self.spatial_field[:, :, None] * self.tint
+            + self.black
+        )
 
 
 def estimate_black_field(src, valid_mask=None):
@@ -115,7 +146,7 @@ def estimate_context_tint(rgb, mask, quad):
     }
 
 
-def adapt_asset(
+def estimate_appearance(
     asset,
     original_rect,
     reference_percentile=99.5,
@@ -150,7 +181,7 @@ def adapt_asset(
         yy, xx = np.mgrid[-1 : 1 : complex(height), -1 : 1 : complex(width)]
         terms = np.stack([np.ones_like(xx), xx, yy, xx * yy], axis=-1)
         coefficients = np.linalg.lstsq(
-            terms[::6, ::6].reshape(-1, 4), filled[::6, ::6].ravel(), rcond=None
+            terms[valid][::6], filled[valid][::6], rcond=None
         )[0]
         broad = np.maximum(terms @ coefficients, 0.000001).astype(np.float32)
     else:
@@ -177,7 +208,10 @@ def adapt_asset(
     # Illumination is estimated after removing the additive veil.
     diffuse = np.maximum(broad - luma(black), 1e-6)
     field = np.clip(diffuse / max(float(np.median(diffuse[valid])), 1e-6), 0.25, 2.0)
-    brightness = float(np.percentile(lum[valid], 97))
+    brightness = float(
+        np.percentile(np.maximum(broad - luma(black), 0)[valid], 80)
+        + np.median(luma(black)[valid])
+    )
     vals = src[valid]
     ls = luma(vals)
     chroma = (vals.max(1) - vals.min(1)) / np.maximum(vals.max(1), 0.005)
@@ -197,8 +231,7 @@ def adapt_asset(
             gain, black, tint, scene_levels
         )
         black_point = float(np.median(luma(black)[valid]))
-    out = a * gain * field[:, :, None] * tint + black
-    return srgb(out), {
+    diagnostics = {
         "exposure_gain_linear": gain,
         "temporal_parameters": parameter_diagnostics,
         "black_point_linear": black_point,
@@ -220,3 +253,42 @@ def adapt_asset(
         else "unresolved_ink_bilinear_light_and_bounded_floor",
         "physically_calibrated": False,
     }
+
+    diagnostics["exposure_method"] = "robust_diffuse_p80_after_ink_removal"
+    diagnostics["luminance_p97_linear"] = float(np.percentile(lum[valid], 97))
+    diagnostics["diffuse_reference_linear"] = brightness
+    return AppearanceEstimate(gain, black, tint, field, diagnostics)
+
+
+def adapt_asset(
+    asset,
+    original_rect,
+    reference_percentile=99.5,
+    match_black=True,
+    valid_mask=None,
+    context_tint=None,
+    ink_resolved=True,
+    context_black_level=None,
+    parameter_filter=None,
+    *,
+    appearance_estimate=None,
+):
+    # Compatibility wrapper around estimation and deterministic rendering.
+    estimate = appearance_estimate
+    if estimate is None:
+        estimate = estimate_appearance(
+            asset,
+            original_rect,
+            reference_percentile,
+            match_black,
+            valid_mask,
+            context_tint,
+            ink_resolved,
+            context_black_level,
+            parameter_filter,
+        )
+    return estimate.render(asset), dict(estimate.diagnostics)
+
+
+def render_appearance(asset, estimate):
+    return estimate.render(asset)

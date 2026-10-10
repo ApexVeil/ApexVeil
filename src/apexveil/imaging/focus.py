@@ -32,7 +32,7 @@ def estimate_edge_softness(rgb, quad):
             "method": "outside_image_fallback",
         }
     # Suppress JPEG/sensor noise before measuring the edge-spread function.
-    pre_sigma = 3.0
+    pre_sigma = 0.7
     gray = cv2.GaussianBlur(gray, (0, 0), pre_sigma)
     offsets = np.arange(-band, band, 0.5)
     estimates = []
@@ -53,8 +53,8 @@ def estimate_edge_softness(rgb, quad):
             middle = np.where(np.abs(offsets) < band * 0.65)[0]
             peak = middle[np.argmax(gradient[middle])]
             if (
-                gradient[peak] < 0.0003
-                or np.percentile(values, 90) - np.percentile(values, 10) < 0.012
+                gradient[peak] < 0.003
+                or np.percentile(values, 90) - np.percentile(values, 10) < 0.035
             ):
                 continue
             left = right = peak
@@ -75,12 +75,12 @@ def estimate_edge_softness(rgb, quad):
             "reliable": False,
             "method": "insufficient_edge_contrast_fallback",
         }
-    sigma = float(np.clip(np.median(estimates), 0.35, 20.0))
+    sigma = float(np.clip(np.percentile(estimates, 60), 0.35, 20.0))
     return {
         "sigma_px": sigma,
         "samples": len(estimates),
         "reliable": True,
         "spread_p20_p80": np.percentile(estimates, [20, 80]).tolist(),
-        "method": "robust_edge_spread_isotropic",
+        "method": "robust_low_presmoothing_edge_spread",
         "calibrated": False,
     }
