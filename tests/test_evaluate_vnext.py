@@ -1,6 +1,7 @@
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -516,3 +517,117 @@ def test_tracking_resource_hash_rejects_stale_and_wrong_provenance(tmp_path):
             workers=1,
             estimators=estimators,
         )
+
+
+def _write_av_source(path, frames, fps=30):
+    height, width = frames[0].shape[:2]
+    duration = len(frames) / fps
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s:v",
+            f"{width}x{height}",
+            "-r",
+            str(fps),
+            "-i",
+            "pipe:0",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:sample_rate=48000:duration={duration:.9f}",
+            "-frames:v",
+            str(len(frames)),
+            "-c:v",
+            "libx264",
+            "-crf",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            str(path),
+        ],
+        input=np.stack(frames).tobytes(),
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_full_audio_run_derives_missing_duration_field(tmp_path):
+    root, template, estimators, frames = _fixture(tmp_path / "full")
+    manifest_path = root / "shot_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.pop("duration_seconds", None)
+    source_path = Path(manifest["source_path"])
+    _write_av_source(source_path, frames, fps=30)
+    manifest["source_path"] = str(source_path)
+    manifest["source_sha256"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
+    manifest_path.write_text(json.dumps(manifest))
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source_path),
+            "-ss",
+            "0",
+            "-t",
+            str(5 / 30),
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "copy",
+            "-vn",
+            str(root / "source-audio.mka"),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    result = render_vnext(
+        root,
+        tmp_path / "full-output",
+        template_path=template,
+        workers=1,
+        estimators=estimators,
+    )
+    assert result["complete_timeline"] is True
+    assert result["duration_seconds"] == 5 / 30
+    assert result["duration_source"] == "derived_source_interval"
+    assert result["source_audio_verification"]["absolute_source_packet_hashes_match"]
+    assert result["source_changed_during_evaluation"] is False
+    for path in result["output_paths"].values():
+        probe = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,nb_frames,duration",
+                "-of",
+                "json",
+                path,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        streams = json.loads(probe.stdout)["streams"]
+        video = next(stream for stream in streams if stream["codec_type"] == "video")
+        audio = next(stream for stream in streams if stream["codec_type"] == "audio")
+        assert int(video["nb_frames"]) == 5
+        assert abs(float(video["duration"]) - 5 / 30) < 1e-3
+        assert audio["codec_type"] == "audio"

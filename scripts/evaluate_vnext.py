@@ -81,6 +81,36 @@ def _source_snapshot_changed(start: dict, end: dict) -> bool:
     ) != end.get("files_sha256")
 
 
+def _validated_source_duration(manifest: dict) -> tuple[float, str]:
+    interval = manifest.get("source_interval_seconds")
+    if not isinstance(interval, list) or len(interval) != 2:
+        raise ValueError("Manifest source_interval_seconds must contain [start, end]")
+    start, end = map(float, interval)
+    if not np.isfinite([start, end]).all() or end <= start:
+        raise ValueError("Manifest source interval must be finite and nonempty")
+    fps = float(manifest["fps"])
+    frame_duration = int(manifest["frame_count"]) / fps
+    interval_duration = end - start
+    if not np.isclose(interval_duration, frame_duration, rtol=0, atol=1e-6):
+        raise ValueError(
+            "Source interval duration disagrees with frame_count/fps: "
+            f"{interval_duration} != {frame_duration}"
+        )
+    declared = manifest.get("duration_seconds")
+    if declared is not None and not np.isclose(
+        float(declared), interval_duration, rtol=0, atol=1e-6
+    ):
+        raise ValueError(
+            "Manifest duration_seconds disagrees with source_interval_seconds"
+        )
+    source = (
+        "manifest.duration_seconds"
+        if declared is not None
+        else "derived_source_interval"
+    )
+    return interval_duration, source
+
+
 def _decode_shot(path: Path, expected_count: int) -> list[np.ndarray]:
     capture = cv2.VideoCapture(str(path))
     if not capture.isOpened():
@@ -755,6 +785,7 @@ def render_vnext(
     manifest_path = root / "shot_manifest.json"
     manifest = json.loads(manifest_path.read_text())
     validate_manifest(manifest)
+    duration_seconds, duration_source = _validated_source_duration(manifest)
     shots = manifest["shots"]
     all_ids = {shot["id"] for shot in shots}
     selected = set(shot_ids) if shot_ids else all_ids
@@ -813,6 +844,8 @@ def render_vnext(
         "source_changed_during_evaluation": None,
         "source_sha256": manifest["source_sha256"],
         "source_interval_seconds": manifest["source_interval_seconds"],
+        "duration_seconds": duration_seconds,
+        "duration_source": duration_source,
         "fps": fps,
         "expected_frame_count": int(manifest["frame_count"])
         if full_run
@@ -846,7 +879,7 @@ def render_vnext(
             source,
             audio_source,
             float(manifest["source_interval_seconds"][0]),
-            float(manifest["duration_seconds"]),
+            duration_seconds,
         )
     silent_paths, encoders = {}, {}
     frame_cursor = 0
