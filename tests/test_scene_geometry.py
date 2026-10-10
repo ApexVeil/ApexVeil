@@ -197,3 +197,26 @@ def test_malformed_agent_quad_does_not_abort_other_scene_hypotheses():
     best = select_scene_geometry(candidates)
     assert best is not None
     assert len(best.diagnostics["rejected_guidance_candidates"]) == 2
+
+
+def test_disconnected_micro_pixels_are_ignored_for_fit_only():
+    image, mask, truth = scene()
+    mask[10, 245] = 255
+    mask[15, 248] = 255
+    before = mask.copy()
+    candidates = propose_scene_geometry(image, mask, aspect=179 / 59)
+    best = select_scene_geometry(candidates)
+    assert best is not None
+    assert np.max(np.linalg.norm(best.quad - truth, axis=1)) < 2
+    assert best.diagnostics["fit_only_ignored_microcomponent_pixels"] == 2
+    assert not best.diagnostics["raw_mask_filtered"]
+    np.testing.assert_array_equal(mask, before)
+
+
+def test_substantial_separated_visibility_is_never_microfiltered():
+    image, mask, _ = scene()
+    mask[:, 100:110] = 0
+    candidates = propose_scene_geometry(image, mask, aspect=3)
+    assert all(
+        c.diagnostics["fit_only_ignored_microcomponent_pixels"] == 0 for c in candidates
+    )

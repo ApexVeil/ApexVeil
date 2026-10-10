@@ -27,6 +27,19 @@ class SceneGeometryCandidate:
 
 def _line_quad(mask):
     binary = (mask > 0).astype(np.uint8)
+    # Fit-only robustness: a few disconnected single-pixel predictions can
+    # pull a hull hundreds of pixels away. Keep the original mask everywhere
+    # else, and never discard a substantive visible fragment or occlusion split.
+    x0, y0, width, height = cv2.boundingRect(binary)
+    local = binary[y0 : y0 + height, x0 : x0 + width]
+    _count, labels, stats, _ = cv2.connectedComponentsWithStats(local)
+    areas = stats[1:, cv2.CC_STAT_AREA]
+    tiny_ids = np.flatnonzero(areas <= 3) + 1
+    ignored = int(areas[tiny_ids - 1].sum()) if len(tiny_ids) else 0
+    if ignored and ignored <= float(areas.sum()) * 0.002:
+        local[np.isin(labels, tiny_ids)] = 0
+    else:
+        ignored = 0
     q, method = fit_quad(binary)
     # fit_quad includes an outward optical allowance. A physical UV hypothesis
     # must estimate the line itself: its height controls hidden-side completion.
@@ -40,7 +53,7 @@ def _line_quad(mask):
         distance = np.abs(np.cross(points - a, direction))
         chosen = points[(t > 0.15) & (t < 0.85) & (distance < max(3, length * 0.06))]
         if len(chosen) < 6:
-            return q, method
+            return q, method, ignored
         vx, vy, x, y = cv2.fitLine(chosen, cv2.DIST_HUBER, 0, 0.01, 0.01).ravel()
         lines.append((np.array([x, y]), np.array([vx, vy])))
     corners = []
@@ -49,15 +62,15 @@ def _line_quad(mask):
         b, u = lines[i]
         matrix = np.column_stack((v, -u))
         if abs(np.linalg.det(matrix)) < 0.025:
-            return q, method
+            return q, method, ignored
         corners.append(a + np.linalg.solve(matrix, b - a)[0] * v)
     try:
         fitted = order_quad(corners)
     except ValueError:
-        return q, method
+        return q, method, ignored
     if not 0.65 < cv2.contourArea(fitted) / max(cv2.contourArea(q), 1) < 1.5:
-        return q, method
-    return fitted, "unbiased_observed_boundary_lines"
+        return q, method, ignored
+    return fitted, "unbiased_observed_boundary_lines", ignored
 
 
 def _edge_classes(mask, quad, guidance):
@@ -303,7 +316,7 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
     anchors = list(anchors or [])[:8]
     if np.count_nonzero(mask) < 16:
         return []
-    fragment, method = _line_quad(mask)
+    fragment, method, ignored_microcomponents = _line_quad(mask)
     labels = _edge_classes(mask, fragment, guidance)
     censored = [i for i, label in enumerate(labels) if label != "surface"]
     physical_aspect = float(guidance.get("physical_aspect", aspect))
@@ -346,6 +359,8 @@ def propose_scene_geometry(rgb, mask, *, aspect, guidance=None, anchors=None):
             guidance_source=guidance.get("source"),
             physical_aspect_assumption=physical_aspect,
             visibility_policy="current_native_mask_unchanged",
+            fit_only_ignored_microcomponent_pixels=ignored_microcomponents,
+            raw_mask_filtered=False,
         )
         if containment < 0.88:
             eligible = False
