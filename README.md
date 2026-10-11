@@ -1,28 +1,54 @@
+<div align="center">
+
+<img src="docs/assets/apexveil-icon.svg" alt="ApexVeil icon" width="112" height="112" />
+
 # ApexVeil · 极影
 
 **Precision in motion.**
 
-ApexVeil is an independent project for scene-consistent automotive image and video compositing. Its first workflow is replacing or anonymizing license plates while respecting perspective, visibility, lighting and imaging blur.
+Natural plate replacement and privacy for automotive images and video.
 
-[Project page](https://apexveil.github.io) · [Architecture](docs/ARCHITECTURE.md) · [Roadmap](docs/ROADMAP.md)
+[Website](https://apexveil.github.io) ·
+[Watch the demo](https://apexveil.github.io/#video) ·
+[Quick start](#quick-start) ·
+[Studio guide](docs/STUDIO.md) ·
+[Roadmap](docs/ROADMAP.md)
 
-## Status
+[![Checks](https://github.com/ApexVeil/ApexVeil/actions/workflows/ci.yml/badge.svg)](https://github.com/ApexVeil/ApexVeil/actions/workflows/ci.yml)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](environment.yml)
+[![Status](https://img.shields.io/badge/Status-pre--alpha-FF694A?style=flat-square)](#current-scope)
+[![License](https://img.shields.io/badge/License-Apache--2.0-8B949E?style=flat-square)](LICENSE)
 
-**Experimental compositing core / pre-alpha.** Images and videos share deterministic composition with automatic geometry, boundary, appearance and camera-degradation estimation. Offline video uses bidirectional motion consensus within reviewed shots. Estimator interfaces allow future learned modules without regenerating the supplied artwork. Multi-target treatment requires explicit selection. Difficult occlusion, clipping and optical-edge cases still require review.
+</div>
 
-| Capability | Current scope |
-|---|---|
-| Still-image processing | CLI, directory batches, visible masks, corner corrections, replacement/blur/mosaic |
-| Short video composition | Bounded continuous-shot experiment; native SAM tracking and offline geometry |
-| Reviewed montage | Manifest-driven shots and source audio; a 70-second, 30 fps development montage. Automatic shot selection and native VFR are not implemented |
-| Optional Codex scene advice | Experimental source-bound proposal → render → visual review loop; bounded retries, existing operator login |
-| Personal Web Studio | Upload, target selection and download for images and bounded continuous-shot experiments; loopback + SSH forwarding |
+<p align="center">
+  <a href="https://apexveil.github.io/#video">
+    <img src="https://apexveil.github.io/assets/demos/video/drive-past-poster.jpg" alt="Real video comparison: original RGB, native SAM 3.1 masks, and ApexVeil plate replacement" width="1000" />
+  </a>
+  <br />
+  <sub>RGB · SAM 3.1 · ApexVeil — <a href="https://apexveil.github.io/#video">watch the real 3.3-second demo</a></sub>
+</p>
 
-SAM3.1 is one model backend; ApexVeil's product and source are independent of upstream model naming and any other project.
+## What it does
 
-## Setup
+ApexVeil replaces or anonymizes license plates while matching perspective, visibility, lighting and capture softness. Images and video use one deterministic compositing core; your supplied artwork stays intact.
 
-Prerequisites: Git, Conda, an NVIDIA GPU/compatible driver and FFmpeg on PATH. The reference environment uses Python 3.12 and PyTorch 2.10 with CUDA 12.8. Obtain access to the official [SAM3.1 checkpoint](https://huggingface.co/facebook/sam3.1) and authenticate with your own Hugging Face account.
+| | Capability |
+| --- | --- |
+| **Replace, blur, mosaic** | Use transparent custom artwork or anonymize a selected plate. Other detected plates can be blurred. |
+| **Two-stage Studio** | Run SAM once, then change the template, treatment or AI settings and regenerate from the cached observations. |
+| **Scene matching** | Estimate the full plate plane separately from visible pixels, foreground protection and material appearance. |
+| **Offline video** | Combine native tracking with bidirectional geometry stabilization and temporal appearance filtering. |
+| **Optional AI guidance** | Request bounded geometry and appearance advice through the operator's Codex login, with explicit model and reasoning choices. |
+
+## Quick start
+
+Requires **Git, Conda, an NVIDIA GPU with a compatible driver, and FFmpeg**. The reference environment uses Python 3.12, PyTorch 2.10 and CUDA 12.8.
+
+<details>
+<summary><strong>Install the environment and SAM3.1 checkpoint</strong></summary>
+
+Request access to the official [SAM3.1 checkpoint](https://huggingface.co/facebook/sam3.1), then:
 
 ```sh
 git clone --recurse-submodules https://github.com/ApexVeil/ApexVeil.git
@@ -38,78 +64,58 @@ apexveil models download
 apexveil doctor
 ```
 
-The checkpoint lives in `models/sam3.1/`, with pinned provenance in [models/manifest.json](models/manifest.json). Model weights and user media are never committed.
+Model provenance is pinned in [models/manifest.json](models/manifest.json). Weights, credentials and private media stay outside Git.
 
-## Image processing
+</details>
+
+Start the Studio with your transparent PNG artwork:
 
 ```sh
-CUDA_VISIBLE_DEVICES=0 apexveil image /path/to/photo.jpg \
-  --template /path/to/artwork.png --output outputs/example --comparison
+conda activate apexveil
+python -m apexveil.web --gpu 0 --port 18768 --template /path/to/artwork.png
 ```
 
-The command saves effects, native candidate masks, declared edit support, geometry previews and a JSON report. With `--comparison`, diagnostic panels expose RGB, raw SAM masks and the latest output.
-See [image pipeline documentation](docs/IMAGE_PIPELINE.md) for multi-target
-selection, manual corner overrides and current limitations.
-
-## Bounded video composition
+Open **http://127.0.0.1:18768/**. For a remote GPU server, forward that port with ordinary SSH:
 
 ```sh
-CUDA_VISIBLE_DEVICES=0 python -m apexveil.video_pipeline /path/to/source.mp4 \
-  --start 240 --duration 2 --template /path/to/artwork.png \
-  --output outputs/video-example
+ssh -N -L 127.0.0.1:18768:127.0.0.1:18768 your-gpu-host
 ```
 
-This exports original, independent-frame and temporal comparison MP4s with frame
-and audio diagnostics. It accepts at most four seconds of an already-selected
-continuous shot. Multi-target clips require `--target-id`; visually confirmed
-false tracks may be excluded with `--exclude-ids`. See [video pipeline](docs/VIDEO_PIPELINE.md)
-and [development experiment](docs/VIDEO_EXPERIMENT_20261010.md) for limitations.
+**Upload → Stage 1: detect & track → choose a target → Stage 2: compose → download.**
 
-## Personal Web Studio
+Stage 1 does not call an AI advisor. Stage 2 can be repeated without rerunning SAM and keeps earlier result versions. AI guidance is optional; enabling it requires your own working Codex CLI login. See the [Studio guide](docs/STUDIO.md) for model choices, timing and cache behavior.
 
-```sh
-python -m apexveil.web --gpu 0 --port 18768 \
-  --template /path/to/artwork.png --advisor-profile sol-medium
-```
+## Current scope
 
-Access the server through SSH forwarding; upload, select a plate and download the
-result. Image processing and up-to-eight-second continuous-shot trials share the
-scene core. See [Studio operation and timing](docs/STUDIO.md). Public hosting and
-invitations are not enabled.
+**Pre-alpha, built for offline experimentation.** The Studio supports still images and continuous SDR video shots up to **8 seconds, 1080p and 30 fps**. It runs on your GPU server and is accessed through a browser; the public website is a pre-rendered showcase.
 
-## Scene solver and optional AI guidance
+Difficult occlusion, fast directional blur and complex optical effects still need visual review. A successful render is not a guarantee of photorealism or complete anonymization. The older image/montage CLI paths have not all migrated to the Studio's scene solver.
 
-A newer [scene solver](docs/SCENE_SOLVER.md) separates the complete plane from
-visible pixels, image clipping and foreground evidence. It shares one deterministic
-renderer between still images and video frames. Optional Codex guidance supplies
-bounded geometry and lighting data; it does not redraw the supplied artwork or
-modify renderer code. This opt-in developer workflow is not yet the default image
-or montage command. The personal [Web Studio](docs/STUDIO.md) uses this new core for interactive trials.
+## Documentation
 
-## Bounded GPU validation
+| Guide | Contents |
+| --- | --- |
+| [Studio](docs/STUDIO.md) | Interactive workflow, reusable stages, AI settings and downloads |
+| [Scene solver](docs/SCENE_SOLVER.md) | Geometry, visibility and deterministic composition |
+| [Video workflow](docs/video-workflow.md) | Native tracking, temporal stabilization and current limits |
+| [Image CLI](docs/IMAGE_PIPELINE.md) · [Video CLI](docs/VIDEO_PIPELINE.md) | Batch processing and developer experiments |
+| [Estimator interfaces](docs/ESTIMATOR_CONTRACT.md) | Boundaries for future learned estimation modules |
+| [Development](docs/DEVELOPMENT.md) · [Architecture](docs/ARCHITECTURE.md) | Project structure and contribution setup |
 
-Place a short video or numerically named JPEG frames in a private data directory. A single frame is a one-image segmentation test. The command writes masks and a JSON report; it does not change the original or replace its pixels.
+Run the CPU checks without downloading model weights:
 
 ```sh
-CUDA_VISIBLE_DEVICES=0 apexveil smoke data/private/smoke-frames --max-frames 3 --output outputs/smoke
 python -m pytest -q
+node --test tests/*.test.cjs
+ruff check src tests --select E9,F63,F7,F82
 ```
-
-## Estimation and evaluation
-
-See the [estimator contract](docs/ESTIMATOR_CONTRACT.md), [offline geometry](docs/offline-geometry-design.md) and [appearance estimator](docs/appearance-estimation.md). These documents distinguish implemented estimation from unresolved visual failures. Tests check compositing and tracking contracts; they do not certify photorealism or anonymization.
-
-## Product direction
-
-- One shared processing core for images and video.
-- Transparent custom artwork, blur and mosaic as per-target treatments.
-- User selection through clicks or short strokes, with explicit corrections.
-- Separate full-surface geometry from the currently visible region.
-- Server-side AI review, configurable by the operator.
-- A remote Web editor accessed through ordinary SSH forwarding during development.
-
-See [development notes](docs/DEVELOPMENT.md) for the intended forwarding workflow. Public hosting and invitations are deferred until the core is ready.
 
 ## License
 
-Original ApexVeil code: Apache-2.0. SAM source and weights retain their separate upstream SAM License. See [third-party notices](THIRD_PARTY_NOTICES.md).
+Original ApexVeil code is licensed under **[Apache-2.0](LICENSE)**. SAM source and weights retain their separate upstream license. See [third-party notices](THIRD_PARTY_NOTICES.md).
+
+---
+
+<p align="center">
+  Built by <a href="https://github.com/ApexVeil">ApexVeil</a> · <a href="https://apexveil.github.io">Precision in motion.</a>
+</p>
