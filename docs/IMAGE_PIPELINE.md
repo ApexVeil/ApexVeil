@@ -21,7 +21,9 @@ The existing pinned backend audits every learned tensor before inference. No
 other project's source, environment, or private migration scripts are imported.
 
 Output subdirectories contain `report.json`, visible masks, geometry previews,
-local comparison sheets, and lossless PNG effects. Source files are untouched.
+local comparison sheets, declared edit-support masks and lossless PNG effects.
+With `--comparison`, `index.html` shows RGB | all raw SAM masks | the latest
+Replace or Blur result in full and detail views. Source files are untouched.
 EXIF orientation is applied before processing and an existing ICC profile is
 carried into the PNG. Carrying an ICC profile is not full HDR/wide-gamut color
 management; the current compositor uses an sRGB-like transfer approximation.
@@ -60,10 +62,11 @@ in a local crop. Visible mask holes are retained. A separate convex boundary and
 robust line fit estimate full-plane corners; image gradients refine these corners
 within angle/area guards. Fitting a plane does **not** fill the compositing mask.
 
-A surface touching the image boundary, a very small plane, substantial missing
-area, or failed geometry is marked `needs_review`. Replacement is skipped until
-corners are supplied or `--allow-uncertain` explicitly requests a flagged preview.
-User-supplied corners are also recorded as manual input. These geometric checks
+Missing or unsupported complete-plane geometry is rejected. A valid but small,
+dark or otherwise uncertain surface can render with a `needs_review` status.
+Strong perspective is not rejected merely because its projected aspect differs
+from the artwork. `--allow-uncertain` may permit an existing flagged hypothesis;
+it cannot invent absent corners. Supplied corners remain explicit manual input. These geometric checks
 are heuristic: they do not prove that a segmentation correctly excludes an
 occluder or that a partially hidden plate's full extent was recovered.
 
@@ -74,12 +77,19 @@ retained. Alpha values at or above 248 become opaque to prevent old glyphs
 showing through near-opaque artwork; rounded transparent edges are retained.
 A premultiplied linear-light warp avoids dark fringes. A low-frequency luminance
 field, black point, and conservative neutral tint approximate the local light.
-Only known visible plate pixels may be changed, including small old-plate corner
-cleanup. Foreground mask holes remain pixel-identical in the working buffer.
+A bounded boundary estimator declares additional editable support when local
+surface/background evidence permits it. Native visibility is retained separately.
+Closed visibility holes and explicitly protected foreground remain unchanged;
+pixels outside declared support are also unchanged before encoding. These exact
+invariants do not prove that automatically inferred support is physically right.
+Background repair abstains when nearby donor layers disagree; that can leave an
+old colored rim requiring correction instead of inventing a damaged new edge.
 
-A robust edge-spread heuristic estimates isotropic replacement softness. Strong
-defocus estimates are flagged for review. `--blur-sigma` overrides this estimate
-in source pixels. This is not a calibrated depth-of-field or directional-motion
+The degradation provider estimates isotropic replacement softness and noise.
+Automatic image and video composition use that same provider result. Strong
+defocus estimates are flagged for review. `--blur-sigma` is an explicit numeric
+override in source pixels, including zero; it is not silently increased by a
+second estimator. This is not a calibrated depth-of-field or directional-motion
 blur model; low contrast, nearby structure and sensor noise can bias it.
 Sharp moving shadows, strong lens flare, defocused foreground matting, and
 physically different reflective materials are not solved by this approximation.

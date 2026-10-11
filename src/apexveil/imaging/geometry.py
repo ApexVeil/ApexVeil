@@ -1,5 +1,8 @@
 """Robust planar geometry, separate from visible segmentation."""
 
+from dataclasses import dataclass, field
+from itertools import combinations
+
 import cv2
 import numpy as np
 
@@ -211,14 +214,200 @@ def assess_geometry(mask, quad):
 
 
 def template_geometry_flags(quad, artwork_aspect):
-    """Shared still/video guard against stretching a visible sliver into a face.
+    """Validate a projective plane, never infer occlusion from apparent aspect.
 
-    Strong genuine perspective can trigger this conservative gate. A manual
-    complete-plane correction is needed; it is not a detector confidence score.
+    Any nondegenerate convex quadrilateral can project the artwork rectangle.
+    Visibility evidence belongs to the estimator, not an apparent aspect gate.
     """
-    q = np.asarray(quad, np.float32)
-    lengths = [np.linalg.norm(q[(i + 1) % 4] - q[i]) for i in range(4)]
-    aspect = (lengths[0] + lengths[2]) / max(1.0, lengths[1] + lengths[3])
-    if aspect / artwork_aspect < 0.55:
-        return ["possible_occlusion_or_extreme_foreshortening"]
+    if not np.isfinite(artwork_aspect) or artwork_aspect <= 0:
+        raise ValueError("Artwork aspect must be finite and positive")
+    try:
+        q = order_quad(quad)
+    except (ValueError, cv2.error):
+        return ["degenerate_projected_surface"]
+    edges = np.roll(q, -1, axis=0) - q
+    lengths = np.linalg.norm(edges, axis=1)
+    cross = np.abs(np.cross(edges, np.roll(edges, -1, axis=0)))
+    sine = cross / np.maximum(lengths * np.roll(lengths, -1), 1e-6)
+    if min(lengths) < 2 or min(sine) < 0.025:
+        return ["ill_conditioned_projected_surface"]
     return []
+
+
+@dataclass
+class SurfaceGeometry:
+    """Full-plane hypothesis and evidence; never a replacement mask.
+
+    Confidence is an engineering evidence score, not a calibrated probability.
+    visible_mask is always the unmodified current native segmentation.
+    """
+
+    quad: np.ndarray | None
+    visible_mask: np.ndarray
+    confidence: float
+    flags: list[str] = field(default_factory=list)
+    diagnostics: dict = field(default_factory=dict)
+
+
+def _boundary_support(mask, quad):
+    # Bound the distance transform to the surface ROI, including exterior pixels.
+    h0, w0 = mask.shape
+    low = np.maximum(np.floor(quad.min(0)).astype(int) - 6, 0)
+    high = np.minimum(np.ceil(quad.max(0)).astype(int) + 7, [w0, h0])
+    if np.any(high <= low):
+        return [0.0] * 4
+    mask = mask[low[1] : high[1], low[0] : high[0]]
+    quad = quad - low
+    binary = (mask > 0).astype(np.uint8)
+    boundary = binary - cv2.erode(binary, np.ones((3, 3), np.uint8))
+    distance = cv2.distanceTransform(1 - boundary, cv2.DIST_L2, 3)
+    short = min(np.linalg.norm(quad[(i + 1) % 4] - quad[i]) for i in range(4))
+    tolerance = max(1.5, min(3.0, short * 0.025))
+    supports = []
+    h, w = mask.shape
+    for a, b in zip(quad, np.roll(quad, -1, axis=0)):
+        points = a + np.linspace(0.08, 0.92, 80)[:, None] * (b - a)
+        x, y = np.rint(points).astype(int).T
+        valid = (x >= 1) & (x < w - 1) & (y >= 1) & (y < h - 1)
+        close = np.zeros(len(points), bool)
+        close[valid] = distance[y[valid], x[valid]] <= tolerance
+        supports.append(float(close.mean()))
+    return supports
+
+
+def visible_containment(mask, quad):
+    """Fraction of observed pixels explained by a plane (occluders are absent)."""
+    ys, xs = np.nonzero(mask)
+    if not len(xs):
+        return 0.0
+    x0, x1, y0, y1 = xs.min(), xs.max() + 1, ys.min(), ys.max() + 1
+    local = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    cv2.fillConvexPoly(local, np.rint(quad - [x0, y0]).astype(np.int32), 1)
+    return float(local[ys - y0, xs - x0].mean())
+
+
+def _supported_enclosing_quad(mask):
+    """Intersect observed hull sides, allowing a modest missing corner."""
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    hull = cv2.convexHull(np.concatenate(contours))
+    poly = cv2.approxPolyDP(hull, 0.008 * cv2.arcLength(hull, True), True)[:, 0]
+    if not 4 <= len(poly) <= 10:
+        return None
+    area = cv2.contourArea(hull)
+    best = None
+    for ids in combinations(range(len(poly)), 4):
+        lines = [
+            (poly[i].astype(float), (poly[(i + 1) % len(poly)] - poly[i]).astype(float))
+            for i in ids
+        ]
+        corners = []
+        for j in range(4):
+            a, v = lines[j - 1]
+            b, u = lines[j]
+            mat = np.column_stack((v, -u))
+            if abs(np.linalg.det(mat)) < 1e-4:
+                break
+            corners.append(a + np.linalg.solve(mat, b - a)[0] * v)
+        if len(corners) != 4:
+            continue
+        try:
+            q = order_quad(corners)
+        except ValueError:
+            continue
+        ratio = cv2.contourArea(q) / max(area, 1)
+        if not 0.97 <= ratio <= 1.6:
+            continue
+        if min(cv2.pointPolygonTest(q, tuple(map(float, p)), True) for p in poly) < -2:
+            continue
+        support = _boundary_support(mask, q)
+        if min(support) < 0.30:
+            continue
+        score = np.mean(support) - 0.25 * (ratio - 1)
+        if best is None or score > best[0]:
+            best = (score, q)
+    return None if best is None else best[1]
+
+
+def estimate_surface_geometry(
+    rgb, visible_mask, template_aspect_ratio, *, observed_quad=None
+):
+    """Estimate full-plane geometry without assuming a frontal view.
+
+    Four supported boundary lines identify a plane despite internal foreground
+    holes or a modest missing corner. Frame clipping is under-constrained in a
+    single image and returns no plane; offline motion can recover it from a
+    supported neighbor. A rectangular visible sliver remains fundamentally
+    ambiguous without additional image or temporal evidence.
+    """
+    mask = np.asarray(visible_mask)
+    if rgb is not None and np.asarray(rgb).shape[:2] != mask.shape:
+        raise ValueError("RGB frame and visible mask dimensions must match")
+    if mask.ndim != 2:
+        raise ValueError("Visible mask must have shape (height, width)")
+    if not np.isfinite(template_aspect_ratio) or template_aspect_ratio <= 0:
+        raise ValueError("Template aspect must be finite and positive")
+    binary = (mask > 0).astype(np.uint8)
+    if np.count_nonzero(binary) < 16:
+        return SurfaceGeometry(None, mask, 0.0, ["insufficient_visible_surface"])
+    if observed_quad is not None:
+        try:
+            quad = order_quad(observed_quad)
+        except ValueError:
+            return SurfaceGeometry(None, mask, 0.0, ["invalid_observation"])
+        method = "provided_observation"
+    else:
+        try:
+            quad = _supported_enclosing_quad(binary)
+            method = "supported_boundary_intersections"
+            if quad is None:
+                quad, method = fit_quad(binary)
+        except (ValueError, cv2.error):
+            return SurfaceGeometry(None, mask, 0.0, ["degenerate_visible_surface"])
+    edge_logs = []
+    if (
+        rgb is not None
+        and "partially_out_of_frame" not in assess_geometry(binary, quad)["flags"]
+    ):
+        try:
+            refined, edge_logs = edge_refine(rgb, quad, visible_mask=binary)
+        except (ValueError, cv2.error):
+            refined = quad
+            edge_logs = [{"status": "invalid_rgb_refinement_keep_boundary"}]
+        # RGB edges contribute only when independently supported by segmentation.
+        if min(_boundary_support(binary, refined)) >= min(
+            _boundary_support(binary, quad)
+        ):
+            quad = refined
+    assessment = assess_geometry(binary, quad)
+    flags = list(assessment["flags"])
+    flags.extend(template_geometry_flags(quad, template_aspect_ratio))
+    support = _boundary_support(binary, quad)
+    containment = visible_containment(binary, quad)
+    confidence = float(
+        np.clip(np.mean(support) * min(support) ** 0.5 * containment, 0, 1)
+    )
+    diagnostics = {
+        **assessment,
+        "method": method,
+        "boundary_support": support,
+        "visible_containment": containment,
+        "candidate_quad": quad.tolist(),
+        "confidence_semantics": "uncalibrated_boundary_evidence",
+        "rgb_edge_refinement": edge_logs,
+        "protected_mask": "unavailable",
+        "full_plane_status": "boundary_hypothesis_not_semantic_confirmation",
+        "completeness_confidence": None,
+    }
+    if min(support) < 0.35 or containment < 0.92:
+        flags.append("insufficient_boundary_support")
+    blocking = {
+        "partially_out_of_frame",
+        "insufficient_boundary_support",
+        "ill_conditioned_projected_surface",
+        "degenerate_projected_surface",
+    }
+    if blocking.intersection(flags):
+        return SurfaceGeometry(None, mask, min(confidence, 0.25), flags, diagnostics)
+    if assessment["min_edge_px"] < 12:
+        confidence *= assessment["min_edge_px"] / 12
+    return SurfaceGeometry(quad, mask, confidence, flags, diagnostics)

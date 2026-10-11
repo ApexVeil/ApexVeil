@@ -2,8 +2,9 @@
 
 import cv2
 import numpy as np
+
 from apexveil.imaging.appearance import adapt_asset
-from apexveil.imaging.color import srgb, linear
+from apexveil.imaging.color import linear, srgb
 
 
 def scene():
@@ -16,7 +17,7 @@ def scene():
 
 def test_colored_veil_survives_on_new_black_material_without_copying_glyphs():
     base = scene()
-    h, w = base.shape[:2]
+    _h, w = base.shape[:2]
     veil = np.zeros_like(base)
     veil[:, :, 0] = np.linspace(0.05, 0.02, w)
     veil[:, :, 1] = 0.007
@@ -97,3 +98,32 @@ def test_unresolved_ink_cannot_lift_new_black_plate_to_old_green_face_brightness
         context_tint=np.ones(3),
     )
     assert result.max() <= 8
+
+
+def test_sparse_specular_pixels_do_not_determine_material_exposure():
+    from apexveil.imaging.appearance import estimate_appearance
+
+    source = scene() * 0.35
+    reference = srgb(source)
+    glint = reference.copy()
+    glint[4:12, 4:180] = 255
+    asset = np.full_like(reference, 150)
+    ordinary = estimate_appearance(asset, reference)
+    affected = estimate_appearance(asset, glint)
+    assert affected.gain < ordinary.gain * 1.4
+
+
+def test_injected_estimate_renders_exact_parameters_without_copying_source_glyphs():
+    from apexveil.imaging.appearance import AppearanceEstimate, render_appearance
+
+    asset = np.full((10, 20, 3), 120, np.uint8)
+    estimate = AppearanceEstimate(
+        0.4,
+        np.full(asset.shape, 0.003, np.float32),
+        np.ones(3),
+        np.ones(asset.shape[:2], np.float32),
+        {"provider": "test"},
+    )
+    actual = render_appearance(asset, estimate)
+    expected = srgb(linear(asset) * 0.4 + 0.003)
+    np.testing.assert_array_equal(actual, expected)

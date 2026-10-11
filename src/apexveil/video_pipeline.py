@@ -6,36 +6,33 @@ Production VFR/HDR, shot detection and long-job recovery are not implemented.
 """
 
 import argparse
-from fractions import Fraction
 import hashlib
 import json
-from pathlib import Path
 import shutil
 import subprocess
 import time
+from fractions import Fraction
+from pathlib import Path
+
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageOps, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+
 from .config import load_settings
-from .imaging.compositor import load_template, replace_surface, redact_surface
-from .imaging.focus import estimate_edge_softness
+from .estimation import get_default_estimators
+from .imaging.compositor import load_template, redact_surface, replace_surface
+from .imaging.offline_geometry import refine_shot_geometry
 from .imaging.photometry import TemporalPhotometry
-from .imaging.geometry import (
-    fit_quad,
-    edge_refine,
-    assess_geometry,
-    template_geometry_flags,
-)
-from .imaging.temporal import (
-    TemporalGeometry,
-    TemporalAppearance,
-    rectified_visible_reference,
-)
+from .imaging.temporal import rectified_visible_reference
 
 
 def command(args):
     result = subprocess.run(
-        [str(x) for x in args], stdin=subprocess.DEVNULL, capture_output=True, text=True
+        [str(x) for x in args],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if result.returncode:
         raise RuntimeError(f"Command failed: {args[0]}\n{result.stderr[-4000:]}")
@@ -368,6 +365,174 @@ def make_comparison(
     contact.save(output_dir.parent / "comparison-contact.jpg", quality=94)
 
 
+class LazyRGBFrames:
+    """Re-decodable frame sequence; holds one RGB frame rather than a whole shot."""
+
+    def __init__(self, source, frame_count=None):
+        self.paths = list(source) if frame_count is None else None
+        self.count = len(self.paths) if self.paths is not None else frame_count
+        self.capture = None if self.paths is not None else cv2.VideoCapture(str(source))
+        self.cached_index = None
+        self.cached = None
+        self.next_index = 0
+
+    def __len__(self):
+        return self.count
+
+    def __getitem__(self, index):
+        if not 0 <= index < self.count:
+            raise IndexError(index)
+        if index == self.cached_index:
+            return self.cached
+        if self.paths is not None:
+            with Image.open(self.paths[index]) as image:
+                frame = np.array(image.convert("RGB"))
+        else:
+            if self.next_index != index:
+                self.capture.set(cv2.CAP_PROP_POS_FRAMES, index)
+            ok, bgr = self.capture.read()
+            if not ok:
+                raise RuntimeError(f"Video decoder ended at frame {index}")
+            frame = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+            self.next_index = index + 1
+        self.cached_index, self.cached = index, frame
+        return frame
+
+    def close(self):
+        if self.capture is not None:
+            self.capture.release()
+        self.cached = None
+
+
+def estimate_geometry_track(frames, masks, aspect, *, estimators=None, identity=None):
+    """Use the injected observation provider once, then one offline refinement."""
+    estimators = estimators or get_default_estimators()
+    if len(frames) != len(masks):
+        raise ValueError("Frames and native masks must have equal length")
+    observations = []
+    for i in range(len(frames)):
+        rgb = frames[i]
+        if masks[i].shape != rgb.shape[:2]:
+            raise ValueError("Cached mask dimensions do not match decoded frames")
+        observations.append(estimators.geometry.estimate(rgb, masks[i], aspect))
+    refined = refine_shot_geometry(
+        frames, masks, aspect, surface_estimates=observations, identity=identity
+    )
+    for estimate in refined:
+        estimate.diagnostics["flags"] = list(estimate.flags)
+        estimate.diagnostics["status"] = (
+            "needs_review"
+            if estimate.quad is None
+            else "motion_fused"
+            if len(estimate.diagnostics["anchors"]) > 1
+            else "observed"
+        )
+    return observations, refined
+
+
+def geometry_review_flags(estimate):
+    informational = {"offline_motion_refined", "temporally_supported_full_plane"}
+    if (
+        "temporally_supported_full_plane" in estimate.flags
+        and estimate.quad is not None
+    ):
+        informational |= {"partially_out_of_frame", "insufficient_boundary_support"}
+    return [flag for flag in estimate.flags if flag not in informational]
+
+
+def add_declared_support(full_support, detail):
+    if detail:
+        x0, y0, x1, y1 = detail["bbox_xyxy"]
+        full_support[y0:y1, x0:x1] |= detail["support"]
+
+
+def render_surface_pair(
+    rgb, mask, observation, estimate, template, estimators, photometry, noise_seed
+):
+    """Shared product renderer for independent and offline geometry comparisons."""
+    baseline, fused = rgb.copy(), rgb.copy()
+    baseline_meta, temporal_meta = {}, {}
+    support_a, support_b = {}, {}
+    flags = geometry_review_flags(estimate)
+    if not mask.any():
+        photometry.reset()
+        flags.append("target_not_visible")
+        return (
+            baseline,
+            fused,
+            baseline_meta,
+            temporal_meta,
+            {},
+            flags,
+            support_a,
+            support_b,
+        )
+    if np.percentile(rgb[mask > 0].mean(axis=1) / 255, 97) < 0.04:
+        flags.append("very_dark_surface")
+    if estimate.diagnostics.get("cut_before"):
+        photometry.reset()
+    q = estimate.quad if estimate.quad is not None else observation.quad
+    focus = {"sigma_px": 0.35, "reliable": False}
+    degradation = None
+    if q is not None:
+        degradation = estimators.degradation.estimate(rgb, mask, q)
+        focus = {**degradation.diagnostics, "sigma_px": float(degradation.sigma_px)}
+    if observation.quad is not None:
+        baseline, baseline_meta = replace_surface(
+            rgb,
+            mask,
+            observation.quad,
+            template,
+            focus["sigma_px"],
+            estimators=estimators,
+            noise_seed=noise_seed,
+            edit_support_out=support_a,
+        )
+    if estimate.quad is not None:
+        height, width = template.alpha.shape
+        reference, coverage = rectified_visible_reference(
+            rgb, mask, estimate.quad, (width, height)
+        )
+        if reference is not None:
+            fused, temporal_meta = replace_surface(
+                rgb,
+                mask,
+                estimate.quad,
+                template,
+                focus["sigma_px"],
+                appearance_reference=reference,
+                appearance_parameter_filter=photometry.filter,
+                degradation_estimate=degradation,
+                estimators=estimators,
+                noise_seed=noise_seed,
+                edit_support_out=support_b,
+            )
+            temporal_meta["temporal_appearance"] = {
+                "reference_average_applied": False,
+                "parameter_filter": "TemporalPhotometry",
+                "geometry_filter": "offline_only",
+            }
+            temporal_meta["reference_visible_fraction"] = coverage
+        else:
+            flags.append("replacement_skipped_no_appearance")
+    else:
+        photometry.reset()
+        flags.append("replacement_skipped_no_geometry")
+    for metadata in (baseline_meta, temporal_meta):
+        if metadata.get("boundary", {}).get("needs_review"):
+            flags.append("boundary_needs_review")
+    return (
+        baseline,
+        fused,
+        baseline_meta,
+        temporal_meta,
+        focus,
+        flags,
+        support_a,
+        support_b,
+    )
+
+
 def run_video(
     source,
     start,
@@ -379,6 +544,8 @@ def run_video(
     cached_clip=None,
     target_id=None,
     exclude_ids=(),
+    *,
+    estimators=None,
 ):
     if not 0 < duration <= 4 or start < 0:
         raise ValueError(
@@ -386,6 +553,7 @@ def run_video(
         )
     if bool(tracking_cache) != bool(cached_clip):
         raise ValueError("Cache reuse requires both --tracking-cache and --cached-clip")
+    estimators = estimators or get_default_estimators()
     output.mkdir(parents=True, exist_ok=True)
     cv2.setNumThreads(2)
     begun = time.perf_counter()
@@ -400,6 +568,10 @@ def run_video(
             "imaging/photometry.py",
             "imaging/geometry.py",
             "imaging/focus.py",
+            "imaging/offline_geometry.py",
+            "imaging/boundary.py",
+            "imaging/degradation.py",
+            "estimation.py",
         )
     }
     source_hash = file_sha256(source)
@@ -544,82 +716,55 @@ def run_video(
     per_dir, temporal_dir = output / "per-frame", output / "temporal"
     per_dir.mkdir(exist_ok=True)
     temporal_dir.mkdir(exist_ok=True)
-    geometry, appearance = TemporalGeometry(), TemporalAppearance()
+    frame_sequence = LazyRGBFrames(paths)
+    mask_sequence = [
+        (np.array(Image.open(masks[i])) > 0).astype(np.uint8)
+        if i in masks
+        else np.zeros(frame_sequence[i].shape[:2], np.uint8)
+        for i in range(len(paths))
+    ]
+    observations, estimates = estimate_geometry_track(
+        frame_sequence,
+        mask_sequence,
+        width / height,
+        estimators=estimators,
+        identity=chosen_id,
+    )
+    frame_sequence.close()
+    (output / "frames.jsonl").write_text("")
     photometry = TemporalPhotometry(fps)
     timeline = timestamp_mapping(len(paths), fps, start)
     reports = []
     render_started = time.perf_counter()
     for idx, path in enumerate(paths):
         rgb = np.array(Image.open(path).convert("RGB"))
-        mask = (
-            (np.array(Image.open(masks[idx])) > 0).astype(np.uint8)
-            if idx in masks
-            else np.zeros(rgb.shape[:2], np.uint8)
+        mask = mask_sequence[idx]
+        observation, estimate = observations[idx], estimates[idx]
+        observed, quality = observation.quad, observation.diagnostics
+        (
+            baseline,
+            fused,
+            baseline_meta,
+            temporal_meta,
+            focus,
+            flags,
+            support_a,
+            support_b,
+        ) = render_surface_pair(
+            rgb,
+            mask,
+            observation,
+            estimate,
+            template,
+            estimators,
+            photometry,
+            noise_seed=idx * 1000003 + (chosen_id + 1) * 9176,
         )
-        if mask.shape != rgb.shape[:2]:
-            raise ValueError("Cached mask dimensions do not match decoded frames")
-        flags, observed, quality = [], None, {}
-        if mask.any():
-            try:
-                initial, method = fit_quad(mask)
-                observed, logs = edge_refine(rgb, initial, visible_mask=mask)
-                quality = assess_geometry(mask, observed)
-                flags.extend(quality["flags"])
-                flags.extend(template_geometry_flags(observed, width / height))
-                values = rgb[mask > 0].astype(np.float32) / 255
-                if np.percentile(values.mean(axis=1), 97) < 0.04:
-                    flags.append("very_dark_surface")
-            except (ValueError, cv2.error, np.linalg.LinAlgError) as error:
-                flags.append("geometry_failed")
-                quality["error"] = str(error)
-        else:
-            flags.append("target_not_visible")
-        current_reliable = observed is not None and not flags
-        estimate = geometry.step(rgb, mask, observed, current_reliable)
-        flags.extend(estimate.diagnostics["flags"])
-        if "possible_cut_or_flash_state_reset" in flags:
-            appearance.reset()
-            photometry.reset()
-        baseline, fused = rgb.copy(), rgb.copy()
-        baseline_meta, temporal_meta = {}, {}
-        focus = (
-            estimate_edge_softness(rgb, observed)
-            if observed is not None
-            else {"sigma_px": 0.35, "reliable": False}
-        )
-        if current_reliable:
-            baseline, baseline_meta = replace_surface(
-                rgb, mask, observed, template, focus["sigma_px"]
-            )
-        if estimate.quad is not None and mask.any():
-            reference, coverage = rectified_visible_reference(
-                rgb, mask, estimate.quad, (width, height)
-            )
-            current_reference = reference
-            reference, sigma, appearance_diag = appearance.step(
-                reference, focus["sigma_px"]
-            )
-            flags.extend(appearance_diag["flags"])
-            if reference is not None:
-                fused, temporal_meta = replace_surface(
-                    rgb,
-                    mask,
-                    estimate.quad,
-                    template,
-                    sigma,
-                    appearance_reference=current_reference,
-                    appearance_parameter_filter=photometry.filter,
-                )
-                appearance_diag["reference_average_applied"] = False
-                temporal_meta["temporal_appearance"] = appearance_diag
-                temporal_meta["reference_visible_fraction"] = coverage
-            else:
-                flags.append("replacement_skipped_no_appearance")
-        else:
-            appearance.reset()
-            photometry.reset()
-            flags.append("replacement_skipped_no_geometry")
-        edited_support = mask > 0
+        baseline_support = np.zeros(mask.shape, bool)
+        temporal_support = np.zeros(mask.shape, bool)
+        add_declared_support(baseline_support, support_a)
+        add_declared_support(temporal_support, support_b)
+        native_support = mask > 0
         redacted_other_ids = []
         for other in frame_objects.get(idx, []):
             other_id = int(other["object_id"])
@@ -632,12 +777,15 @@ def run_video(
             if other_mask.any():
                 baseline, _ = redact_surface(baseline, other_mask, "blur")
                 fused, _ = redact_surface(fused, other_mask, "blur")
-                edited_support |= other_mask > 0
+                baseline_support |= other_mask > 0
+                temporal_support |= other_mask > 0
+                native_support |= other_mask > 0
                 redacted_other_ids.append(other_id)
-        for name, image in [("per-frame", baseline), ("temporal", fused)]:
-            outside = int(
-                np.count_nonzero(np.any(image != rgb, axis=2) & ~edited_support)
-            )
+        for name, image, allowed in [
+            ("per-frame", baseline, baseline_support),
+            ("temporal", fused, temporal_support),
+        ]:
+            outside = int(np.count_nonzero(np.any(image != rgb, axis=2) & ~allowed))
             if outside:
                 raise RuntimeError(f"{name} changed {outside} protected pixels")
         Image.fromarray(baseline).save(per_dir / path.name, compress_level=2)
@@ -658,7 +806,11 @@ def run_video(
             "focus": focus,
             "per_frame_appearance": baseline_meta,
             "temporal_appearance": temporal_meta,
-            "outside_visible_masks_changed_pixels": 0,
+            "outside_visible_masks_changed_pixels": int(
+                np.count_nonzero(np.any(fused != rgb, axis=2) & ~native_support)
+            ),
+            "outside_edit_support_changed_pixels": 0,
+            "estimator": estimators.metadata(),
         }
         reports.append(record)
         with (output / "frames.jsonl").open("a") as stream:
@@ -688,6 +840,8 @@ def run_video(
     ]
     result = {
         "kind": "bounded_video_compositing_experiment",
+        "estimator": estimators.metadata(),
+        "geometry_policy": "per_identity_offline_bidirectional_consensus",
         "source_name": source.name,
         "source_sha256": source_hash,
         "source_interval_seconds": [start, start + duration],
